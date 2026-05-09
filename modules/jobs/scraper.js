@@ -1,228 +1,128 @@
-const { chromium } = require('playwright');
 const path = require('path');
 const fs = require('fs');
 
 /**
- * Scrapes LinkedIn for Marketing/Digital/Sales jobs in Barbados.
- * Uses the saved linkedin_state.json for authentication.
+ * Lightweight Scraper using Native Node.js Fetch (No Playwright required!)
+ * Optimized for Barbados job market.
  */
-const scrapeLinkedIn = async (context) => {
-    const page = await context.newPage();
-    const url = "https://www.linkedin.com/jobs/search/?keywords=Marketing&location=Barbados&f_AL=true";
 
+// Helper to fetch HTML and parse it using Regex (Fast & Lightweight)
+async function fetchHtml(url) {
     try {
-        console.log("  [LinkedIn] Navigating...");
-        await page.goto(url, { waitUntil: 'domcontentloaded' });
-        await page.waitForTimeout(5000);
-
-        // LinkedIn may redirect to login if cookies expired
-        if (page.url().includes('/login') || page.url().includes('/checkpoint')) {
-            console.error("  [LinkedIn] Session expired. linkedin_state.json needs to be refreshed.");
-            return [];
-        }
-
-        await page.waitForSelector(".job-card-container", { timeout: 12000 });
-        const jobCards = await page.locator(".job-card-container").all();
-        const results = [];
-
-        for (const card of jobCards.slice(0, 5)) {
-            try {
-                const linkEl = card.locator("a.job-card-list__title--link, a.job-card-container__link").first();
-                const href = await linkEl.getAttribute("href");
-                if (!href) continue;
-
-                const jobId = href.includes("view/")
-                    ? href.split("view/")[1].split("/")[0].split("?")[0]
-                    : null;
-                if (!jobId) continue;
-
-                const title = (await linkEl.textContent()).trim();
-
-                const companyEl = card.locator(
-                    ".job-card-container__primary-description, .artdeco-entity-lockup__subtitle span"
-                ).first();
-                const company = (await companyEl.count()) > 0
-                    ? (await companyEl.textContent()).trim()
-                    : "Unknown Company";
-
-                results.push({
-                    id: `li_${jobId}`,
-                    title,
-                    company,
-                    url: `https://www.linkedin.com/jobs/view/${jobId}/`,
-                    summary: `${title} at ${company} — via LinkedIn.`,
-                    location: "Barbados",
-                    source: "LinkedIn"
-                });
-            } catch (e) {
-                console.error("  [LinkedIn] Card parse error:", e.message);
-            }
-        }
-
-        console.log(`  [LinkedIn] Found ${results.length} jobs.`);
-        return results;
-
+        const response = await fetch(url, {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            },
+            signal: AbortSignal.timeout(15000)
+        });
+        if (!response.ok) return null;
+        return await response.text();
     } catch (e) {
-        console.error("  [LinkedIn] Scrape failed:", e.message);
-        return [];
-    } finally {
-        await page.close();
+        console.error(`  [Fetch Error] ${url}: ${e.message}`);
+        return null;
     }
+}
+
+const scrapeLinkedIn = async () => {
+    // LinkedIn heavily blocks non-browser traffic, but we can try a basic public search URL
+    const url = "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search?keywords=Marketing&location=Barbados&f_AL=true";
+    console.log("  [LinkedIn] Fetching lightweight guest feed...");
+    
+    const html = await fetchHtml(url);
+    if (!html) return [];
+
+    const results = [];
+    // Basic regex to find job IDs and titles in the guest feed
+    const jobMatches = [...html.matchAll(/job-search-card__title">([\s\S]*?)<\/h3>[\s\S]*?href="(.*?)"/g)];
+    
+    for (const match of jobMatches.slice(0, 5)) {
+        const title = match[1].trim();
+        const fullUrl = match[2].split('?')[0];
+        const jobId = fullUrl.split('-').pop();
+
+        results.push({
+            id: `li_${jobId}`,
+            title,
+            company: "LinkedIn Lead",
+            url: fullUrl,
+            summary: `${title} - Real-time lead from LinkedIn Barbados.`,
+            location: "Barbados",
+            source: "LinkedIn"
+        });
+    }
+    return results;
 };
 
-/**
- * Scrapes CaribbeanJobs for Marketing jobs in Barbados.
- * Uses the correct ShowResults.aspx URL with Barbados location filter.
- * Job listing selectors confirmed from live HTML: h2 > a and company link.
- */
-const scrapeCaribbeanJobs = async (browser) => {
-    const page = await browser.newPage();
-    // Confirmed working URL from live page fetch
-    const url = "https://www.caribbeanjobs.com/ShowResults.aspx?Keywords=Marketing&Location=Barbados&perpage=10&Page=1";
+const scrapeCaribbeanJobs = async () => {
+    const url = "https://www.caribbeanjobs.com/ShowResults.aspx?Keywords=Marketing&Location=Barbados";
+    console.log("  [CaribbeanJobs] Fetching...");
+    
+    const html = await fetchHtml(url);
+    if (!html) return [];
 
-    try {
-        console.log("  [CaribbeanJobs] Navigating...");
-        await page.goto(url, { waitUntil: 'domcontentloaded' });
-        await page.waitForTimeout(4000);
+    const results = [];
+    // Regex to find job titles and links
+    const jobMatches = [...html.matchAll(/<h2><a href="(.*?)">(.*?)<\/a><\/h2>/g)];
+    
+    for (const match of jobMatches.slice(0, 5)) {
+        const href = match[1];
+        const title = match[2].trim();
+        const fullUrl = href.startsWith('http') ? href : `https://www.caribbeanjobs.com${href}`;
 
-        // Job listings appear as: <h2><a href="/Job-Title-Job-12345.aspx">Title</a></h2>
-        // followed by a company link
-        const jobLinks = await page.locator(".job-result-title a, h2 a[href*='-Job-']").all();
-        const results = [];
-
-        for (const link of jobLinks.slice(0, 5)) {
-            try {
-                const title = (await link.textContent()).trim();
-                const href = await link.getAttribute("href");
-                if (!href || !title) continue;
-
-                const fullUrl = href.startsWith("http")
-                    ? href
-                    : `https://www.caribbeanjobs.com${href}`;
-
-                // Try to get company from sibling element
-                const parent = link.locator("..").locator("..");
-                const companyEl = parent.locator("a[href*='-Jobs-']").first();
-                const company = (await companyEl.count()) > 0
-                    ? (await companyEl.textContent()).trim()
-                    : "Caribbean Employer";
-
-                // Generate a stable ID from the URL
-                const jobId = href.match(/Job-(\d+)/)?.[1] || Math.random().toString(36).substr(2, 9);
-
-                results.push({
-                    id: `cj_${jobId}`,
-                    title,
-                    company,
-                    url: fullUrl,
-                    summary: `${title} at ${company} — via CaribbeanJobs.`,
-                    location: "Barbados",
-                    source: "CaribbeanJobs"
-                });
-            } catch (e) {
-                console.error("  [CaribbeanJobs] Item parse error:", e.message);
-            }
-        }
-
-        console.log(`  [CaribbeanJobs] Found ${results.length} jobs.`);
-        return results;
-
-    } catch (e) {
-        console.error("  [CaribbeanJobs] Scrape failed:", e.message);
-        return [];
-    } finally {
-        await page.close();
+        results.push({
+            id: `cj_${Math.random().toString(36).substr(2, 5)}`,
+            title,
+            company: "Caribbean Employer",
+            url: fullUrl,
+            summary: `${title} - Marketing vacancy in Barbados via CaribbeanJobs.`,
+            location: "Barbados",
+            source: "CaribbeanJobs"
+        });
     }
+    return results;
 };
 
-/**
- * Scrapes the Barbados Job Register (government portal) — no login required.
- * URL: https://barbadosjobregister.gov.bb
- */
-const scrapeBarbadosJobRegister = async (browser) => {
-    const page = await browser.newPage();
+const scrapeBarbadosJobRegister = async () => {
     const url = "https://barbadosjobregister.gov.bb/vacancy/search?search=marketing";
+    console.log("  [GovRegister] Fetching...");
+    
+    const html = await fetchHtml(url);
+    if (!html) return [];
 
-    try {
-        console.log("  [BarbadosJobRegister] Navigating...");
-        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 });
-        await page.waitForTimeout(4000);
+    const results = [];
+    // Find vacancy titles and links
+    const jobMatches = [...html.matchAll(/href="(\/vacancy\/view\/.*?)"[\s\S]*?>(.*?)<\/a>/g)];
 
-        // Try various common selectors for government job portals
-        const jobItems = await page.locator(
-            ".vacancy-card, .job-card, article.vacancy, .job-listing, tr.vacancy"
-        ).all();
+    for (const match of jobMatches.slice(0, 5)) {
+        const href = match[1];
+        const title = match[2].trim();
+        if (title.includes('<')) continue; // Skip HTML noise
 
-        const results = [];
-
-        for (const item of jobItems.slice(0, 5)) {
-            try {
-                const titleEl = item.locator("h2, h3, .vacancy-title, .job-title, td a").first();
-                const title = (await titleEl.textContent()).trim();
-                const href = await titleEl.locator("a").first().getAttribute("href").catch(() => null)
-                    || await item.locator("a").first().getAttribute("href").catch(() => null);
-
-                if (!title) continue;
-
-                const fullUrl = href
-                    ? (href.startsWith("http") ? href : `https://barbadosjobregister.gov.bb${href}`)
-                    : url;
-
-                const companyEl = item.locator(".employer, .company, .organisation").first();
-                const company = (await companyEl.count()) > 0
-                    ? (await companyEl.textContent()).trim()
-                    : "Barbados Employer";
-
-                results.push({
-                    id: `bjr_${Math.random().toString(36).substr(2, 9)}`,
-                    title,
-                    company,
-                    url: fullUrl,
-                    summary: `${title} at ${company} — via Barbados Job Register.`,
-                    location: "Barbados",
-                    source: "BarbadosJobRegister"
-                });
-            } catch (e) {
-                console.error("  [BarbadosJobRegister] Item parse error:", e.message);
-            }
-        }
-
-        console.log(`  [BarbadosJobRegister] Found ${results.length} jobs.`);
-        return results;
-
-    } catch (e) {
-        console.error("  [BarbadosJobRegister] Scrape failed:", e.message);
-        return [];
-    } finally {
-        await page.close();
+        results.push({
+            id: `bjr_${Math.random().toString(36).substr(2, 5)}`,
+            title,
+            company: "Barbados Government Lead",
+            url: `https://barbadosjobregister.gov.bb${href}`,
+            summary: `${title} - Local Barbadian vacancy.`,
+            location: "Barbados",
+            source: "BarbadosJobRegister"
+        });
     }
+    return results;
 };
 
-/**
- * Main scraper — combines LinkedIn, CaribbeanJobs, and Barbados Job Register.
- */
 const scrapeJobs = async () => {
-    console.log("\n🔍 Starting multi-source job scrape (Barbados focus)...");
-
-    const statePath = path.resolve(__dirname, '../../linkedin_state.json');
-    const browser = await chromium.launch({ headless: true });
-
-    const liContext = fs.existsSync(statePath)
-        ? await browser.newContext({ storageState: statePath })
-        : await browser.newContext();
-
-    // Run all scrapers in parallel for speed
-    const [linkedInJobs, cjJobs, bjrJobs] = await Promise.all([
-        scrapeLinkedIn(liContext),
-        scrapeCaribbeanJobs(browser),
-        scrapeBarbadosJobRegister(browser)
+    console.log("\n🚀 Starting ultra-lightweight job scrape...");
+    
+    const [li, cj, bjr] = await Promise.all([
+        scrapeLinkedIn(),
+        scrapeCaribbeanJobs(),
+        scrapeBarbadosJobRegister()
     ]);
 
-    await browser.close();
-
-    const allJobs = [...linkedInJobs, ...cjJobs, ...bjrJobs];
-    console.log(`✅ Scrape finished. Total: ${allJobs.length} jobs found.\n`);
-    return allJobs;
+    const all = [...li, ...cj, ...bjr];
+    console.log(`✅ Scrape complete. Found ${all.length} jobs.\n`);
+    return all;
 };
 
 module.exports = { scrapeJobs };
