@@ -19,6 +19,10 @@
     "design": {
       "command": "python3",
       "args": ["/home/devon/social-agent/mcp_servers/design_server.py"]
+    },
+    "research": {
+      "command": "python3",
+      "args": ["/home/devon/social-agent/mcp_servers/research_server.py"]
     }
   },
   "agent": {

@@ -51,6 +51,14 @@ via the MCP protocol (opencode handles this automatically).
 - `add_lead(platform, name, profile_url, headline, industry)` — track lead
 - `list_leads(status)` — list leads
 
+### research server (Google Trends + Gemini)
+- `trending_searches(region)` — current trending searches (barbados, united_states)
+- `interest_over_time(keywords, timeframe)` — interest score for 1-5 keywords
+- `related_queries(keyword, timeframe)` — top/rising related searches
+- `content_opportunities(keyword, timeframe)` — trends + Gemini content ideas
+- `analyze_topic(keyword)` — full research report + post ideas
+- `daily_brief()` — today's trends + content brief
+
 ### design server (HyperFrames/Seedance/Higgsfield)
 - `generate_hyperframes(concept, colors)` — HyperFrames HTML composition
 - `generate_seedance_prompt(text)` — Seedance 2.0 video prompt
@@ -64,6 +72,8 @@ directly to post/draft/check status.
 ### Bot Commands (for the user via Telegram)
 - `/authorize` — Authorize this chat
 - `/draft <topic>` — Generate a LinkedIn post draft
+- `/trends` — Today's trending searches
+- `/research <topic>` — Deep research + content ideas via Google Trends + Gemini
 - `/post <text>` — Post to LinkedIn as Online Everywhere
 - `/post_image <text>` — Reply to an image with caption
 - `/status` — System health check

@@ -18,7 +18,6 @@ import os
 import sys
 import json
 import logging
-import asyncio
 from datetime import datetime
 from pathlib import Path
 
@@ -65,6 +64,26 @@ def draft_content(topic: str) -> dict:
     from content_server import draft_post
     return json.loads(draft_post(topic))
 
+def research_trends() -> dict:
+    """Get trending searches."""
+    sys.path.insert(0, str(Path.home() / "social-agent" / "mcp_servers"))
+    from research_server import trending_searches
+    try:
+        result = json.loads(trending_searches())
+        return result
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
+
+def research_topic(topic: str) -> dict:
+    """Full research: trends + related queries + content ideas."""
+    sys.path.insert(0, str(Path.home() / "social-agent" / "mcp_servers"))
+    from research_server import analyze_topic
+    try:
+        result = json.loads(analyze_topic(topic))
+        return result
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
+
 def health_check() -> dict:
     """Check that all services are reachable."""
     result = {"status": "ok", "services": {}}
@@ -80,7 +99,7 @@ def health_check() -> dict:
 
 # ── Bot ─────────────────────────────────────────────────────────────
 
-async def main():
+def main():
     TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
     if not TOKEN:
         logger.error("TELEGRAM_BOT_TOKEN not set. Set it in .env")
@@ -112,17 +131,21 @@ async def main():
             "I manage LinkedIn content for Online Everywhere.\n"
             "Authenticate with /authorize first.\n\n"
             "Commands:\n"
-            "/draft <topic> - Generate post ideas\n"
-            "/post <text>   - Post to LinkedIn\n"
-            "/status        - Health check\n"
-            "/help          - Full command list"
+            "/draft <topic>   - Draft a post\n"
+            "/trends          - Trending searches right now\n"
+            "/research <topic>- Deep research on a topic\n"
+            "/post <text>     - Post to LinkedIn\n"
+            "/status          - Health check\n"
+            "/help            - Full command list"
         )
         await update.message.reply_text(text)
 
     async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = (
             "/authorize          - Authorize this chat\n"
-            "/draft <topic>      - Draft a LinkedIn post about <topic>\n"
+            "/draft <topic>      - Draft a LinkedIn post\n"
+            "/trends             - Today's trending searches\n"
+            "/research <topic>   - Deep research + content ideas\n"
             "/post <text>        - Post to LinkedIn\n"
             "/post_image <text>  - Reply to an image with caption to post\n"
             "/status             - Health check\n"
@@ -186,7 +209,6 @@ async def main():
             await update.message.reply_text("Reply to an image with /post_image <caption>")
             return
         photos = update.message.reply_to_message.photo
-        # Get the largest photo
         file = await photos[-1].get_file()
         img_path = f"/tmp/telegram_post_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
         await file.download_to_drive(img_path)
@@ -197,6 +219,63 @@ async def main():
             if result.get("status") == "posted":
                 post_id = result.get("id", "")
                 await update.message.reply_text(f"Posted: https://linkedin.com/feed/update/{post_id}")
+            else:
+                await update.message.reply_text(f"Error: {result.get('detail', str(result))}")
+        except Exception as e:
+            await update.message.reply_text(f"Error: {e}")
+
+    async def trends_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not await require_auth(update, context):
+            return
+        await update.message.reply_text("Fetching trending searches...")
+        try:
+            result = research_trends()
+            if result.get("status") == "ok":
+                trends = result.get("trends", [])
+                if trends:
+                    lines = ["**Trending Searches Now:**\n"]
+                    for i, t in enumerate(trends[:10], 1):
+                        lines.append(f"{i}. {t}")
+                    await update.message.reply_text("\n".join(lines))
+                else:
+                    await update.message.reply_text("No trends found.")
+                if "barbados_trends" in result:
+                    bb = result["barbados_trends"]
+                    if bb:
+                        await update.message.reply_text(f"**Barbados:**\n" + "\n".join(f"- {b}" for b in bb[:10]))
+            else:
+                await update.message.reply_text(f"Error: {result.get('detail', str(result))}")
+        except Exception as e:
+            await update.message.reply_text(f"Error: {e}")
+
+    async def research_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not await require_auth(update, context):
+            return
+        topic = " ".join(context.args) if context.args else ""
+        if not topic:
+            await update.message.reply_text("Usage: /research <topic> (e.g. /research AI marketing)")
+            return
+        await update.message.reply_text(f"Researching: {topic}...")
+        try:
+            result = research_topic(topic)
+            if result.get("status") == "ok":
+                msg = f"**Research: {topic}**\n\n"
+                msg += f"Interest Score: {result.get('interest_score', 'N/A')}/100\n"
+                msg += f"Peak Interest: {result.get('peak_interest', 'N/A')}\n\n"
+                top = result.get("top_related", [])
+                if top:
+                    msg += "**Related Searches:**\n" + "\n".join(f"- {q}" for q in top[:8]) + "\n\n"
+                rising = result.get("rising_related", [])
+                if rising:
+                    msg += "**Rising Queries:**\n"
+                    for r in rising[:5]:
+                        q = r["query"] if isinstance(r, dict) else r
+                        msg += f"- {q}\n"
+                    msg += "\n"
+                ideas = result.get("post_ideas", "")
+                if ideas:
+                    msg += f"**Content Ideas:**\n{ideas[:2000]}"
+                await update.message.reply_text(msg[:4000])
             else:
                 await update.message.reply_text(f"Error: {result.get('detail', str(result))}")
         except Exception as e:
@@ -221,12 +300,14 @@ async def main():
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("authorize", authorize))
     app.add_handler(CommandHandler("draft", draft))
+    app.add_handler(CommandHandler("trends", trends_cmd))
+    app.add_handler(CommandHandler("research", research_cmd))
     app.add_handler(CommandHandler("post", post_cmd))
     app.add_handler(CommandHandler("post_image", post_image_cmd))
     app.add_handler(CommandHandler("status", status_cmd))
 
     logger.info("Bot started, polling...")
-    await app.run_polling(allowed_updates=Update.ALL_TYPES)
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

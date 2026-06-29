@@ -20,3 +20,7 @@ sqlite3  # stdlib
 
 # PDF generation (for document posting)
 reportlab>=4.0.0
+
+# Research
+pytrends>=4.9.0
+pandas>=2.0.0

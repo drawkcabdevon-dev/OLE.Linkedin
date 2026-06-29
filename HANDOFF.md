@@ -33,6 +33,7 @@ script using `mcp.server.fastmcp`. Tools available per server:
 |--------|-------|
 | **linkedin** | `create_post`, `post_image`, `post_multi_image`, `create_carousel_post` (sponsored only), `post_document` (gated), `images_to_pdf`, `whoami`, `get_profile`, `list_organizations`, `search_content` |
 | **local-data** | `save_draft`, `list_drafts`, `log_published`, `list_published`, `schedule_content`, `get_calendar`, `add_lead`, `list_leads` |
+| **research** | `trending_searches`, `interest_over_time`, `related_queries`, `content_opportunities`, `analyze_topic`, `daily_brief` |
 | **content** | `draft_post`, `rewrite_post`, `generate_carousel_script`, `generate_batch_ideas` |
 | **images** | `generate_image`, `generate_social_graphic`, `generate_carousel_images`, `list_generated_images` |
 | **design** | `generate_hyperframes`, `generate_seedance_prompt`, `generate_higgsfield_script`, `render_hyperframes`, `list_design_assets` |
@@ -73,6 +74,10 @@ Install into `~/.config/opencode/opencode.json`:
     "design": {
       "command": "python3",
       "args": ["/home/devon/social-agent/mcp_servers/design_server.py"]
+    },
+    "research": {
+      "command": "python3",
+      "args": ["/home/devon/social-agent/mcp_servers/research_server.py"]
     }
   }
 }
