@@ -713,6 +713,61 @@ def main():
         except Exception as e:
             await update.message.reply_text(f"Pipeline error: {e}")
 
+    async def chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Conversational handler for non-command messages."""
+        if not update.message or not update.message.text:
+            return
+        if not await require_auth(update, context):
+            return
+        user_text = update.message.text.strip()
+        await update.message.reply_chat_action("typing")
+        try:
+            from content_server import OLE_SYSTEM_PROMPT
+            system_prompt = OLE_SYSTEM_PROMPT + """
+
+You are the LinkedIn coordinator for Online Everywhere, a data-driven marketing agency in Barbados.
+You chat with the business owner (your client). Be conversational, direct, and helpful.
+
+Your job:
+- If they ask about content marketing strategy, give brief advice and offer to draft a post with /draft
+- If they mention a competitor or industry news, offer to run /mirror or /hot
+- If they want to discuss posting frequency or strategy, reference the /schedule
+- Keep responses tight (2-4 paragraphs max). No fluff. No markdown in inline text.
+- Always end with a single actionable suggestion or question.
+- Never say "as an AI" or "I don't have access to" — just help them directly.
+- Be proactively helpful: if they seem unsure, offer 2-3 options.
+
+Examples of good responses:
+- "That's a solid topic. Want me to draft a post about it? Just say /draft website speed Barbados."
+- "I can counter that angle for you. /mirror websites are dead — I'll flip it to show why most take the wrong lesson."
+- "Daily posts at 14:00 UTC are scheduled. Want to adjust timing with /schedule time?" """
+
+            payload = {
+                "system_instruction": {"parts": [{"text": system_prompt}]},
+                "contents": [{"parts": [{"text": user_text}]}],
+                "generationConfig": {"temperature": 0.7, "maxOutputTokens": 512},
+            }
+            import httpx
+            from pathlib import Path
+            import os
+            GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
+            GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+            r = httpx.post(f"{GEMINI_URL}?key={GOOGLE_API_KEY}", json=payload, timeout=20)
+            r.raise_for_status()
+            data = r.json()
+            candidates = data.get("candidates", [])
+            if candidates:
+                reply = candidates[0]["content"]["parts"][0]["text"]
+                await update.message.reply_text(reply[:3000])
+            else:
+                await update.message.reply_text("Got it. Use /draft or /hot to create content.")
+        except Exception as e:
+            logger.warning(f"Chat handler error: {e}")
+            await update.message.reply_text(
+                "I'm here! Try /hot for trending topics, /draft to create a post, "
+                "or /mirror to counter a competitor."
+            )
+
     # ── Register handlers ───────────────────────────────────────
 
     app.add_handler(CommandHandler("start", start))
@@ -728,6 +783,10 @@ def main():
     app.add_handler(CommandHandler("mirror", mirror_cmd))
     app.add_handler(CommandHandler("post_now", post_now))
     app.add_handler(CommandHandler("status", status_cmd))
+
+    # Catch-all for conversational messages (must be last)
+    from telegram.ext import MessageHandler, filters
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, chat_handler))
 
     # ── Start scheduler ──────────────────────────────────────────
 
