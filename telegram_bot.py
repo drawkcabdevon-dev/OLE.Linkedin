@@ -32,6 +32,7 @@ import json
 import logging
 import random
 import re
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -42,6 +43,99 @@ load_dotenv(Path.home() / ".social-agent" / ".env", override=False)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("telegram-bot")
+
+# ── Gemini rate limiter ─────────────────────────────────────────────
+
+class RateLimiter:
+    """Simple token-bucket rate limiter."""
+    def __init__(self, calls_per_minute: int = 4):
+        self.min_interval = 60.0 / calls_per_minute
+        self.last_call = 0.0
+
+    def wait_time(self) -> float:
+        elapsed = time.time() - self.last_call
+        return max(0.0, self.min_interval - elapsed)
+
+    def can_call(self) -> bool:
+        return self.wait_time() == 0.0
+
+    def record_call(self):
+        self.last_call = time.time()
+
+_gemini_limiter = RateLimiter(calls_per_minute=4)
+_gemini_cache: dict[str, tuple[str, float]] = {}
+CACHE_TTL = 300  # 5 minutes
+
+def gemini_chat(user_text: str, system_prompt: str) -> str | None:
+    """Call Gemini with rate limiting + caching. Returns text or None if rate limited."""
+    cache_key = f"{hash(user_text)}"
+    if cache_key in _gemini_cache:
+        text, ts = _gemini_cache[cache_key]
+        if time.time() - ts < CACHE_TTL:
+            return text
+
+    if not _gemini_limiter.can_call():
+        return None
+
+    try:
+        import httpx
+        GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
+        GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+        payload = {
+            "system_instruction": {"parts": [{"text": system_prompt}]},
+            "contents": [{"parts": [{"text": user_text}]}],
+            "generationConfig": {"temperature": 0.7, "maxOutputTokens": 512},
+        }
+        _gemini_limiter.record_call()
+        r = httpx.post(f"{GEMINI_URL}?key={GOOGLE_API_KEY}", json=payload, timeout=20)
+        r.raise_for_status()
+        data = r.json()
+        candidates = data.get("candidates", [])
+        if candidates:
+            text = candidates[0]["content"]["parts"][0]["text"]
+            _gemini_cache[cache_key] = (text, time.time())
+            return text
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 429:
+            logger.warning("Gemini 429 — rate limited")
+        else:
+            logger.warning(f"Gemini error: {e}")
+    except Exception as e:
+        logger.warning(f"Gemini error: {e}")
+    return None
+
+def detect_intent(text: str) -> str:
+    """Simple intent matching to avoid Gemini calls for common queries."""
+    t = text.lower().strip()
+    if t in ("hi", "hello", "hey", "sup", "yo", "what's up", "good morning", "good evening"):
+        return "greeting"
+    if any(w in t for w in ("what can you do", "help", "commands", "capabilities", "what do you do")):
+        return "help"
+    if any(w in t for w in ("schedule", "posting time", "when do you post", "post daily", "how often")):
+        return "schedule_query"
+    if any(w in t for w in ("thanks", "thank you", "thx", "appreciate", "good", "great", "perfect", "nice")):
+        return "thanks"
+    if any(w in t for w in ("who are you", "who is this", "what is this", "explain yourself")):
+        return "whoami"
+    if any(w in t for w in ("trending", "what's hot", "whats hot", "hot topic", "trend", "what people talking about")):
+        return "trends"
+    if any(w in t for w in ("brainstorm", "ideas", "give me ideas", "think of", "come up with", "what should we post")):
+        return "brainstorm"
+    return "unknown"
+
+INTENT_RESPONSES = {
+    "greeting": "Hey! I'm your LinkedIn coordinator. Need ideas? A post drafted? A competitor countered? Just say the word.\n\nTry: /brainstorm, /draft, /hot, /mirror, or just tell me what you're thinking.",
+    "help": "I handle your LinkedIn content so you don't have to:\n\n• /draft <topic> — Create a post\n• /hot — Instant post from trending topics\n• /mirror <topic> — Counter a competitor\n• /post <text> — Post immediately\n• /schedule — Manage daily auto-posting\n\nOr just talk to me — I'll figure out what you need.",
+    "schedule_query": "Your daily post runs at **14:00 UTC** with an image. Every morning at **9:00 UTC** I send you 3 post ideas to review. Use /schedule to tweak the time, switch to draft mode for review, or change topics.",
+    "thanks": "Always. Holler if you need a post or want to check what's trending.",
+    "whoami": "I'm your LinkedIn coordinator for Online Everywhere. I draft posts, check trends, mirror competitors, and keep your daily content flowing. Think of me as your in-house social media strategist who never sleeps.",
+    "trends": "Use /hot to check what's trending right now and get an instant post draft. Or /trends to just see the list.",
+    "brainstorm": "Use /brainstorm <topic> and I'll throw out 8 rapid-fire post ideas. Or just tell me what you want to brainstorm about and I'll run with it.",
+}
+
+FALLBACK_REPLY = "Got it. Use /draft to create a post, /hot for trending topics, or /mirror to counter something a competitor posted. Or just keep chatting — I'll help however I can."
+
+RATE_LIMITED_REPLY = "I'm catching up on requests — hit the free tier rate limit. Give me about 30 seconds and try again, or ask me something simple and I'll handle it without the heavy AI."
 
 BASE = Path.home() / "social-agent"
 AUTHORIZED_CHATS_FILE = BASE / "authorized_chats.json"
@@ -132,6 +226,15 @@ def post_to_linkedin(text: str, image_path: str | None = None) -> dict:
             return {"status": "error", "detail": "PDF not supported via Telegram"}
         return json.loads(post_image(text, str(p)))
     return json.loads(create_post(text))
+
+def is_rate_limited(result: dict) -> bool:
+    detail = result.get("detail", "") or str(result)
+    return "429" in detail or "Too Many Requests" in detail or "rate limit" in detail.lower()
+
+def friendly_error(result: dict) -> str:
+    if is_rate_limited(result):
+        return RATE_LIMITED_REPLY
+    return f"Error: {result.get('detail', str(result))[:500]}"
 
 def draft_content(topic: str) -> dict:
     return json.loads(draft_post(topic))
@@ -374,10 +477,11 @@ def main():
             "hot topic reactions, and competitor mirroring.\n\n"
             "Start: /authorize to link this chat\n"
             "Then try:\n"
-            "/hot       - Trending topics, instant post\n"
-            "/mirror    - Counter a competitor's move\n"
-            "/draft     - Generate a post on any topic\n"
-            "/schedule  - Set up daily auto-posting\n"
+            "/brainstorm  - Rapid-fire post ideas on any topic\n"
+            "/hot         - Trending topics, instant post\n"
+            "/mirror      - Counter a competitor's move\n"
+            "/draft       - Generate a post on any topic\n"
+            "/schedule    - Set up daily auto-posting\n"
             "/help      - Full command list"
         )
         await update.message.reply_text(text)
@@ -385,6 +489,7 @@ def main():
     async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = (
             "/authorize          - Link this chat (required once)\n"
+            "/brainstorm <topic> - Rapid-fire 8 post ideas\n"
             "/hot                - Check trends, draft an instant post\n"
             "/mirror <topic>     - Counter a competitor's move or topic\n"
             "/draft <topic>      - Create a post draft\n"
@@ -432,9 +537,9 @@ def main():
             if result.get("status") == "drafted":
                 await update.message.reply_text(f"Draft:\n\n{(result.get('content') or result.get('post', ''))[:3000]}")
             else:
-                await update.message.reply_text(f"Error: {result.get('detail', str(result))}")
+                await update.message.reply_text(friendly_error(result))
         except Exception as e:
-            await update.message.reply_text(f"Error drafting: {e}")
+            await update.message.reply_text(friendly_error({"detail": str(e)}))
 
     async def post_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not await require_auth(update, context): return
@@ -523,7 +628,51 @@ def main():
         except Exception as e:
             await update.message.reply_text(f"Error: {e}")
 
-    async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def brainstorm_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Brainstorm mode: generates rapid-fire post ideas."""
+        if not await require_auth(update, context): return
+        topic = " ".join(context.args) if context.args else "digital marketing for Barbados SMEs"
+        await update.message.reply_chat_action("typing")
+        await update.message.reply_text(f"Brainstorming ideas around: **{topic}**\nGive me a sec...")
+
+        try:
+            from content_server import generate_batch_ideas
+            result = json.loads(generate_batch_ideas(count=8, theme=topic))
+            content = result.get("ideas", "")
+
+            # Parse or use raw
+            lines = content.split("\n")
+            msg = f"**Brainstorm: {topic}**\n\n"
+            idea_count = 0
+            for line in lines:
+                line = line.strip()
+                if line.startswith("IDEA") or line.startswith("**IDEA"):
+                    idea_count += 1
+                    msg += f"\n{line}\n"
+                elif line and idea_count > 0:
+                    msg += f"{line}\n"
+
+                if len(msg) > 3500:
+                    msg += "\n...more ideas available."
+                    break
+
+            if idea_count == 0:
+                msg += content[:2000]
+
+            msg += "\n\n---\nLike one? Use /draft with the topic, or /post to publish immediately."
+            await update.message.reply_text(msg[:4000])
+        except Exception as e:
+            error_msg = str(e)
+            if "429" in error_msg:
+                await update.message.reply_text(RATE_LIMITED_REPLY)
+            else:
+                await update.message.reply_text(f"Brainstorm hit a snag: {error_msg[:200]}")
+
+        # Follow up with a second wave if they want to continue
+        await update.message.reply_text(
+            "Want me to keep brainstorming on a different angle? Just say the topic "
+            "or use /brainstorm again. Or pick one and I'll draft it."
+        )
         if not await require_auth(update, context): return
         await update.message.reply_text("Checking system health...")
         try:
@@ -704,6 +853,26 @@ def main():
         except Exception as e:
             await update.message.reply_text(f"Error: {e}")
 
+    async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not await require_auth(update, context): return
+        await update.message.reply_text("Checking system health...")
+        try:
+            from linkedin_server import whoami
+            profile = json.loads(whoami())
+            linkedin = "ok" if "name" in profile else "error"
+            cfg = load_schedule()
+            sched_status = "enabled" if cfg.get("enabled") else "disabled"
+            text = (
+                f"LinkedIn: {linkedin}\n"
+                f"Schedule: {sched_status}\n"
+                f"Time: {cfg.get('time')} on {cfg.get('days')}\n"
+                f"Mode: {cfg.get('mode')}\n"
+                f"Topics: {len(cfg.get('topics', []))} loaded\n"
+            )
+            await update.message.reply_text(text)
+        except Exception as e:
+            await update.message.reply_text(f"Error: {e}")
+
     async def post_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not await require_auth(update, context): return
         await update.message.reply_text("Running content pipeline now...")
@@ -721,52 +890,34 @@ def main():
             return
         user_text = update.message.text.strip()
         await update.message.reply_chat_action("typing")
+
+        # 1. Try intent-based response (no Gemini call)
+        intent = detect_intent(user_text)
+        if intent != "unknown":
+            reply = INTENT_RESPONSES.get(intent, FALLBACK_REPLY)
+            await update.message.reply_text(reply)
+            return
+
+        # 2. Try Gemini with rate limiting
         try:
             from content_server import OLE_SYSTEM_PROMPT
             system_prompt = OLE_SYSTEM_PROMPT + """
 
 You are the LinkedIn coordinator for Online Everywhere, a data-driven marketing agency in Barbados.
-You chat with the business owner (your client). Be conversational, direct, and helpful.
+You chat with the business owner. Be conversational, direct, and helpful.
 
-Your job:
-- If they ask about content marketing strategy, give brief advice and offer to draft a post with /draft
-- If they mention a competitor or industry news, offer to run /mirror or /hot
-- If they want to discuss posting frequency or strategy, reference the /schedule
-- Keep responses tight (2-4 paragraphs max). No fluff. No markdown in inline text.
-- Always end with a single actionable suggestion or question.
-- Never say "as an AI" or "I don't have access to" — just help them directly.
-- Be proactively helpful: if they seem unsure, offer 2-3 options.
+Keep responses tight (2-4 paragraphs). End with an actionable suggestion or question.
+Never say "as an AI" or "I don't have access to". Offer /draft, /hot, /mirror, /post as options."""
 
-Examples of good responses:
-- "That's a solid topic. Want me to draft a post about it? Just say /draft website speed Barbados."
-- "I can counter that angle for you. /mirror websites are dead — I'll flip it to show why most take the wrong lesson."
-- "Daily posts at 14:00 UTC are scheduled. Want to adjust timing with /schedule time?" """
-
-            payload = {
-                "system_instruction": {"parts": [{"text": system_prompt}]},
-                "contents": [{"parts": [{"text": user_text}]}],
-                "generationConfig": {"temperature": 0.7, "maxOutputTokens": 512},
-            }
-            import httpx
-            from pathlib import Path
-            import os
-            GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
-            GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
-            r = httpx.post(f"{GEMINI_URL}?key={GOOGLE_API_KEY}", json=payload, timeout=20)
-            r.raise_for_status()
-            data = r.json()
-            candidates = data.get("candidates", [])
-            if candidates:
-                reply = candidates[0]["content"]["parts"][0]["text"]
+            reply = gemini_chat(user_text, system_prompt)
+            if reply:
                 await update.message.reply_text(reply[:3000])
-            else:
-                await update.message.reply_text("Got it. Use /draft or /hot to create content.")
-        except Exception as e:
-            logger.warning(f"Chat handler error: {e}")
-            await update.message.reply_text(
-                "I'm here! Try /hot for trending topics, /draft to create a post, "
-                "or /mirror to counter a competitor."
-            )
+                return
+        except Exception:
+            pass
+
+        # 3. Fallback when Gemini is rate limited or unavailable
+        await update.message.reply_text(FALLBACK_REPLY)
 
     # ── Register handlers ───────────────────────────────────────
 
@@ -779,6 +930,7 @@ Examples of good responses:
     app.add_handler(CommandHandler("post", post_cmd))
     app.add_handler(CommandHandler("post_image", post_image_cmd))
     app.add_handler(CommandHandler("schedule", schedule_cmd))
+    app.add_handler(CommandHandler("brainstorm", brainstorm_cmd))
     app.add_handler(CommandHandler("hot", hot_cmd))
     app.add_handler(CommandHandler("mirror", mirror_cmd))
     app.add_handler(CommandHandler("post_now", post_now))
