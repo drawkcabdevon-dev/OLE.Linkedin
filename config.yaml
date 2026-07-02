@@ -1,0 +1,99 @@
+# Social Media Agent Configuration
+# cp .env.template .env and fill in your API keys
+
+agent_name: "social-coordinator"
+timezone: "America/Barbados"
+
+platforms:
+  linkedin:
+    enabled: true
+    api_version: "v2"
+
+business:
+  name: "Online Everywhere"
+  url: "https://onlineverywhere.com"
+  tagline: "Data-Driven Marketing, Accelerated by AI."
+  ai_engine: "Ollie"
+  location: "Barbados"
+  target_market: "Barbados SMEs / MSMEs"
+
+  services:
+    - name: "Agentic Solutions"
+      tag: "AI-powered automation"
+      description: "AI agents handle lead follow-up, content generation, customer responses, and data analysis 24/7"
+    - name: "Digital Launchpad"
+      tag: "Website + brand foundation"
+      description: "Full brand identity, enterprise-grade UI/UX, CMS, SEO, social proof, custom business email"
+    - name: "Conversion Catalyst"
+      tag: "CRO & UX optimization"
+      description: "Deep-dive UX audits, conversion optimization, competitor SWOT analysis"
+    - name: "Paid Media Ignition"
+      tag: "Paid advertising"
+      description: "Scalable ROAS-centric budget allocation, dynamic creative optimization"
+    - name: "Proactive Partnership"
+      tag: "Ongoing retainer"
+      description: "Monthly reporting, content refresh, technical maintenance, AI strategy"
+
+  campaign_themes:
+    - id: crisis_78
+      name: "The 78.7% Crisis"
+      angle: "Fear of loss / risk awareness"
+      hook: "78.7% of Barbados businesses only exist on social media"
+    - id: tax_credit
+      name: "Government Tax Credit"
+      angle: "Urgency / free money"
+      hook: "The Government Will Pay for Your Digital Upgrade"
+    - id: website_speed
+      name: "Website Speed & Quality"
+      angle: "Technical superiority"
+      hook: "0.4 Seconds. $0/Month. 100% Yours."
+    - id: ai_agents
+      name: "AI Agent Solutions"
+      angle: "Innovation / competitive advantage"
+      hook: "Your Business Runs 24/7. Shouldn't Your Marketing?"
+    - id: brand_identity
+      name: "Brand Identity"
+      angle: "Professionalism / first impressions"
+      hook: "Your Brand. Everywhere."
+
+  brand_colors:
+    primary: "#4285F4"
+    red: "#EA4335"
+    yellow: "#FBBC05"
+    green: "#34A853"
+    navy: "#202124"
+    navy_muted: "#5F6368"
+
+  typography:
+    headlines: "Plus Jakarta Sans"
+    body: "Inter"
+
+content:
+  primary_keyword: "Digital Marketing in Barbados"
+  secondary_keywords:
+    - "digital marketing Barbados"
+    - "website design Barbados"
+    - "Barbados business digitization tax credit"
+    - "social media management Barbados"
+  max_daily_posts:
+    linkedin: 2
+  best_times:
+    linkedin: ["08:30", "12:00", "17:00"]
+  content_mix:
+    thought_leadership: 40
+    industry_news: 30
+    case_stories: 20
+    engagement: 10
+
+storage:
+  db_path: "/Users/devonclarke/Desktop/developer worspace /onlineeverywhere_-ai-marketing-suite/social-agent/data.db"
+
+leads:
+  enabled: true
+  daily_outbound_limit: 10
+  target_industries:
+    - "Hospitality & Tourism"
+    - "Retail"
+    - "Professional Services"
+  connection_note_template: |
+    Hi {{first_name}}, I came across your profile and saw your work in {{industry}}. As a fellow Barbados-based business helping companies go digital, I'd love to connect and share ideas.

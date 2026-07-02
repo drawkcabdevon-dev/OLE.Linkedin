@@ -1,0 +1,23 @@
+version: "3.9"
+
+services:
+  agent:
+    build: .
+    container_name: ole-linkedin-agent
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - LINKEDIN_ACCESS_TOKEN=${LINKEDIN_ACCESS_TOKEN}
+      - LINKEDIN_ORG_ID=${LINKEDIN_ORG_ID:-125564340}
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - NVIDIA_API_KEY=${NVIDIA_API_KEY:-}
+    volumes:
+      # Persist the database and authorized chats
+      - ./data:/app/data
+      # Persist generated images and assets
+      - ./assets:/app/assets
+    ports:
+      # Not needed unless exposing webhook
+      - "8080:8080"

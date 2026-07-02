@@ -1,0 +1,16 @@
+{
+  "enabled": true,
+  "time": "14:00",
+  "days": "daily",
+  "mode": "draft",
+  "topics": [
+    "Barbados digital marketing",
+    "Barbados SME website optimization",
+    "Barbados small business growth",
+    "Barbados SEO tips",
+    "Barbados social media marketing",
+    "Barbados AI for business",
+    "Barbados website speed"
+  ],
+  "topic_index": 0
+}

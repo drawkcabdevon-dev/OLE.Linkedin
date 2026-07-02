@@ -1,0 +1,26 @@
+# MCP servers
+mcp>=1.0.0
+httpx>=0.27.0
+python-dotenv>=1.0.0
+
+# Image generation (Pollinations.ai)
+Pillow>=10.0.0
+
+# Content generation (Google Gemini)
+google-genai>=1.0.0
+
+# Design assets (HyperFrames / Seedance / Higgsfield)
+jinja2>=3.1.0
+
+# Telegram bot
+python-telegram-bot>=21.0.0
+
+# Database
+sqlite3  # stdlib
+
+# PDF generation (for document posting)
+reportlab>=4.0.0
+
+# Research
+pytrends>=4.9.0
+pandas>=2.0.0
