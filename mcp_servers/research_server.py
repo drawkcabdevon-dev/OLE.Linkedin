@@ -15,9 +15,12 @@ import os
 import logging
 from pathlib import Path
 
-import httpx
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
+
+import sys
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from gemini_client import generate_content as _gemini
 
 load_dotenv(Path.home() / "social-agent" / ".env")
 load_dotenv(Path.home() / ".social-agent" / ".env", override=False)
@@ -27,22 +30,11 @@ logger = logging.getLogger("research-mcp")
 
 server = FastMCP("research")
 
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
-GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
-
 
 def call_gemini(prompt: str, temperature: float = 0.5) -> str:
-    """Call Gemini 2.5 Flash and return response text."""
-    if not GOOGLE_API_KEY:
-        return json.dumps({"status": "error", "detail": "GOOGLE_API_KEY not set"})
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": temperature, "maxOutputTokens": 1024},
-    }
+    """Call Vertex AI Gemini (project billing, no free-tier quota)."""
     try:
-        r = httpx.post(f"{GEMINI_URL}?key={GOOGLE_API_KEY}", json=payload, timeout=30)
-        r.raise_for_status()
-        return r.json()["candidates"][0]["content"]["parts"][0]["text"]
+        return _gemini("You are a marketing research analyst.", prompt, temperature=temperature)
     except Exception as e:
         return f"Error: {e}"
 

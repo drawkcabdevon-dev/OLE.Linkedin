@@ -11,12 +11,16 @@ import json
 import os
 from pathlib import Path
 
-import httpx
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
 
 load_dotenv(Path.home() / ".social-agent" / ".env")
 load_dotenv(Path.home() / "social-agent" / ".env", override=False)
+
+# Insert parent so gemini_client is importable
+import sys
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from gemini_client import generate_content as _gemini
 
 server = FastMCP("content")
 
@@ -26,8 +30,6 @@ ASSETS_DIR.mkdir(parents=True, exist_ok=True)
 
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
 STITCH_API_KEY = os.getenv("STITCH_API_KEY", "")
-GEMINI_MODEL = "gemini-2.5-flash"
-GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
 
 # ── Calendar & Examples ────────────────────────────────────────────
 
@@ -110,21 +112,8 @@ OLE_SYSTEM_PROMPT = (
 
 
 def _call_gemini(system_prompt: str, user_prompt: str, temperature: float = 0.7) -> str:
-    payload = {
-        "system_instruction": {"parts": [{"text": system_prompt}]},
-        "contents": [{"parts": [{"text": user_prompt}]}],
-        "generationConfig": {
-            "temperature": temperature,
-            "maxOutputTokens": 1024,
-        },
-    }
-    r = httpx.post(f"{GEMINI_URL}?key={GOOGLE_API_KEY}", json=payload, timeout=30)
-    r.raise_for_status()
-    data = r.json()
-    candidates = data.get("candidates", [])
-    if not candidates:
-        raise RuntimeError(f"No candidates returned: {data}")
-    return candidates[0]["content"]["parts"][0]["text"]
+    """Call Vertex AI Gemini (project billing, no free-tier quota)."""
+    return _gemini(system_prompt, user_prompt, temperature=temperature)
 
 
 @server.tool()
@@ -161,7 +150,7 @@ def draft_post(topic: str, campaign: str = "", tone: str = "informational") -> s
     )
     try:
         result = _call_gemini(OLE_SYSTEM_PROMPT, user_prompt)
-        return json.dumps({"status": "drafted", "content": result, "model": GEMINI_MODEL}, indent=2)
+        return json.dumps({"status": "drafted", "content": result, "model": "gemini-2.5-flash"}, indent=2)
     except Exception as e:
         return json.dumps({"status": "error", "detail": str(e)})
 
@@ -221,13 +210,15 @@ def generate_imagen_image(prompt: str) -> str:
         prompt: Detailed image description.
     """
     project_id = os.getenv("GOOGLE_CLOUD_PROJECT", "")
-    if not project_id or GOOGLE_API_KEY.startswith("AIza"):
+    if not project_id or project_id == "linkedin-agent-501504":
         return json.dumps({
             "status": "unavailable",
-            "detail": "Imagen requires a Google Cloud project with Vertex AI. "
-                      "Set GOOGLE_CLOUD_PROJECT in .env or use the images MCP server (Pollinations.ai) instead.",
+            "detail": "Imagen requires a different Google Cloud project with Imagen enabled. "
+                      "Use the images MCP server (Pollinations.ai) instead.",
         })
 
+    import subprocess
+    token = subprocess.run(["gcloud", "auth", "print-access-token"], capture_output=True, text=True, timeout=10).stdout.strip()
     url = (
         f"https://us-central1-aiplatform.googleapis.com/v1/"
         f"projects/{project_id}/locations/us-central1/"
@@ -238,7 +229,7 @@ def generate_imagen_image(prompt: str) -> str:
         "parameters": {"sampleCount": 1, "aspectRatio": "1:1"},
     }
     try:
-        r = httpx.post(f"{url}?key={GOOGLE_API_KEY}", json=payload, timeout=60)
+        r = httpx.post(url, json=payload, headers={"Authorization": f"Bearer {token}"}, timeout=60)
         r.raise_for_status()
         data = r.json()
         img_data = data["predictions"][0]["bytesBase64Encoded"]

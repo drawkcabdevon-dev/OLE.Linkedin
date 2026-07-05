@@ -38,7 +38,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv(Path.home() / "social-agent" / ".env")
+load_dotenv(Path(__file__).parent / ".env")
 load_dotenv(Path.home() / ".social-agent" / ".env", override=False)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -67,42 +67,19 @@ _gemini_cache: dict[str, tuple[str, float]] = {}
 CACHE_TTL = 300  # 5 minutes
 
 def gemini_chat(user_text: str, system_prompt: str) -> str | None:
-    """Call Gemini with rate limiting + caching. Returns text or None if rate limited."""
+    """Call Vertex AI Gemini with caching. Returns text or None on failure."""
     cache_key = f"{hash(user_text)}"
     if cache_key in _gemini_cache:
         text, ts = _gemini_cache[cache_key]
         if time.time() - ts < CACHE_TTL:
             return text
-
-    if not _gemini_limiter.can_call():
-        return None
-
     try:
-        import httpx
-        GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
-        GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
-        payload = {
-            "system_instruction": {"parts": [{"text": system_prompt}]},
-            "contents": [{"parts": [{"text": user_text}]}],
-            "generationConfig": {"temperature": 0.7, "maxOutputTokens": 512},
-        }
-        _gemini_limiter.record_call()
-        r = httpx.post(f"{GEMINI_URL}?key={GOOGLE_API_KEY}", json=payload, timeout=20)
-        r.raise_for_status()
-        data = r.json()
-        candidates = data.get("candidates", [])
-        if candidates:
-            text = candidates[0]["content"]["parts"][0]["text"]
-            _gemini_cache[cache_key] = (text, time.time())
-            return text
-    except httpx.HTTPStatusError as e:
-        if e.response.status_code == 429:
-            logger.warning("Gemini 429 — rate limited")
-        else:
-            logger.warning(f"Gemini error: {e}")
+        text = _gemini_vertex(system_prompt, user_text, temperature=0.7, max_tokens=512)
+        _gemini_cache[cache_key] = (text, time.time())
+        return text
     except Exception as e:
-        logger.warning(f"Gemini error: {e}")
-    return None
+        logger.warning(f"Vertex AI Gemini error: {e}")
+        return None
 
 def detect_intent(text: str) -> str:
     """Simple intent matching to avoid Gemini calls for common queries."""
@@ -149,10 +126,11 @@ FALLBACK_REPLY = "Got it. Use /draft to create a post, /hot for trending topics,
 
 RATE_LIMITED_REPLY = "I'm catching up on requests — hit the free tier rate limit. Give me about 30 seconds and try again, or ask me something simple and I'll handle it without the heavy AI."
 
-BASE = Path.home() / "social-agent"
+BASE = Path(os.getenv("OLE_DATA_DIR", "."))
 AUTHORIZED_CHATS_FILE = BASE / "authorized_chats.json"
 SCHEDULE_CONFIG_FILE = BASE / "schedule_config.json"
 PENDING_DRAFT_FILE = BASE / "pending_draft.json"
+FEEDBACK_MEMORY_FILE = BASE / "preferences.json"
 NOTIFY_CHAT_ID = None  # Set when /authorize runs
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")  # For direct HTTP notify
 
@@ -161,6 +139,7 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")  # For direct HTTP notify
 def save_pending_draft(topic: str, content: str, image_path: str | None = None):
     """Save a generated post for preview/approval."""
     data = {"topic": topic, "content": content, "image_path": image_path, "created_at": datetime.now(timezone.utc).isoformat()}
+    PENDING_DRAFT_FILE.parent.mkdir(parents=True, exist_ok=True)
     PENDING_DRAFT_FILE.write_text(json.dumps(data, indent=2))
     logger.info(f"Pending draft saved: {topic}")
 
@@ -181,6 +160,7 @@ def load_authorized_chats() -> set[int]:
     return set()
 
 def save_authorized_chats(chats: set[int]):
+    AUTHORIZED_CHATS_FILE.parent.mkdir(parents=True, exist_ok=True)
     AUTHORIZED_CHATS_FILE.write_text(json.dumps(list(chats)))
 
 def is_authorized(chat_id: int) -> bool:
@@ -213,6 +193,7 @@ def load_schedule() -> dict:
     return dict(DEFAULT_SCHEDULE)
 
 def save_schedule(cfg: dict):
+    SCHEDULE_CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
     SCHEDULE_CONFIG_FILE.write_text(json.dumps(cfg, indent=2))
 
 def days_to_cron(days_str: str) -> str:
@@ -239,15 +220,18 @@ def days_to_cron(days_str: str) -> str:
 
 # ── LinkedIn posting ────────────────────────────────────────────────
 
-SERVER_DIR = str(Path.home() / "social-agent" / "mcp_servers")
-if SERVER_DIR not in sys.path:
-    sys.path.insert(0, SERVER_DIR)
+BASE_DIR = str(Path(__file__).parent.resolve())
+SERVER_DIR = BASE_DIR + "/mcp_servers"
+for d in (SERVER_DIR, BASE_DIR):
+    if d not in sys.path:
+        sys.path.insert(0, d)
 
 from linkedin_server import create_post, post_image, post_multi_image
-from content_server import draft_post, generate_carousel_script, add_premium_example, list_premium_examples, delete_premium_example
+from content_server import draft_post, add_premium_example, list_premium_examples, delete_premium_example
 from image_server import generate_social_graphic, generate_carousel_images
 from research_server import trending_searches, daily_brief
 from local_server import save_draft, log_published, list_published
+from gemini_client import generate_content as _gemini_vertex
 
 def post_to_linkedin(text: str, image_path: str | None = None) -> dict:
     if image_path:
@@ -266,7 +250,35 @@ def friendly_error(result: dict) -> str:
         return RATE_LIMITED_REPLY
     return f"Error: {result.get('detail', str(result))[:500]}"
 
+def load_preferences() -> list[dict]:
+    if FEEDBACK_MEMORY_FILE.exists():
+        return json.loads(FEEDBACK_MEMORY_FILE.read_text())
+    return []
+
+def save_preferences(prefs: list[dict]):
+    FEEDBACK_MEMORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    FEEDBACK_MEMORY_FILE.write_text(json.dumps(prefs, indent=2))
+
+def add_preference(key: str, value: str):
+    prefs = load_preferences()
+    prefs = [p for p in prefs if p.get("key") != key]
+    prefs.append({"key": key, "value": value, "updated": datetime.now(timezone.utc).isoformat()})
+    save_preferences(prefs)
+    return f"Remembered: {key} = {value}"
+
+def build_memory_prompt() -> str:
+    prefs = load_preferences()
+    if not prefs:
+        return ""
+    lines = ["The user has given these content preferences (obey them):"]
+    for p in prefs:
+        lines.append(f"- {p['key']}: {p['value']}")
+    return "\n".join(lines)
+
 def draft_content(topic: str) -> dict:
+    memory = build_memory_prompt()
+    if memory:
+        topic = f"{topic}\n\n{memory}"
     return json.loads(draft_post(topic))
 
 def research_trends_data() -> dict:
@@ -277,7 +289,6 @@ def research_trends_data() -> dict:
 
 def mirror_competitor(competitor_topic: str, competitor_angle: str = "") -> dict:
     """Analyze a competitor's approach or topic and create a counter-post in OLE voice."""
-    import httpx
     prompt = competitor_topic
     if competitor_angle:
         prompt += f"\n\nCompetitor's angle: {competitor_angle}\n\nCreate a post that counters or improves on this. Use data and OLE's unique value."
@@ -348,7 +359,7 @@ def run_content_pipeline(app_instance=None):
     try:
         brief = json.loads(daily_brief())
         if brief.get("status") == "ok":
-            trend_text = brief.get("content_brief", "")
+            trend_text = brief.get("content_brief", brief.get("brief", ""))
     except Exception:
         pass
 
@@ -397,7 +408,7 @@ def run_content_pipeline(app_instance=None):
             preview = f"**Draft Ready for Review — {topic}**\n\n{post_text[:1500]}"
             if img_path:
                 preview += f"\n\nImage generated at: {img_path}"
-            preview += "\n\n---\nSend /approve to publish now, or /reject to skip."
+            preview += "\n\n---\nSend /approve to publish, /edit <feedback> to revise, or /reject to skip."
             _notify(app_instance, preview)
             logger.info(f"Pipeline: draft saved for topic '{topic}', awaiting approval")
         except Exception as e:
@@ -430,6 +441,20 @@ def main():
 
     scheduler = BackgroundScheduler()
     allowed_users = set()
+
+    auth_chat_id = os.getenv("AUTHORIZED_CHAT_ID")
+    if auth_chat_id:
+        try:
+            cid = int(auth_chat_id.strip())
+            allowed_users.add(cid)
+            chats = load_authorized_chats()
+            chats.add(cid)
+            save_authorized_chats(chats)
+            NOTIFY_CHAT_ID = cid
+            logger.info(f"Pre-authorized chat ID {cid} via env var")
+        except (ValueError, OSError):
+            logger.warning(f"Invalid AUTHORIZED_CHAT_ID: {auth_chat_id}")
+
     app = Application.builder().token(TOKEN).build()
 
     def get_app():
@@ -531,9 +556,14 @@ def main():
             "/authorize          - Link this chat (required once)\n"
             "/brainstorm <topic> - Rapid-fire 8 post ideas\n"
             "/planned            - Calendar + preview next post\n"
-            "/preview            - Preview the next post\n"
+            "/preview            - Preview the next post (text + image)\n"
+            "/preview_image      - Preview just the generated image\n"
             "/approve            - Publish the previewed post\n"
             "/reject             - Skip the previewed post\n"
+            "/edit <feedback>    - Edit the pending draft with your feedback\n"
+            "/remember k=v       - Save a preference for future posts\n"
+            "/preferences        - View all saved preferences\n"
+            "/forget <key>       - Remove a saved preference\n"
             "/history            - See what's already been posted\n"
             "/hot                - Check trends, draft an instant post\n"
             "/mirror <topic>     - Counter a competitor's move or topic\n"
@@ -662,14 +692,17 @@ def main():
             result = json.loads(analyze_topic(topic))
             if result.get("status") == "ok":
                 msg = f"**Research: {topic}**\n\n"
-                msg += f"Interest Score: {result.get('interest_score', 'N/A')}/100\n"
-                msg += f"Peak Interest: {result.get('peak_interest', 'N/A')}\n\n"
-                top = result.get("top_related", [])
-                if top:
-                    msg += "**Related:**\n" + "\n".join(f"- {q}" for q in top[:8]) + "\n\n"
-                ideas = result.get("post_ideas", "")
-                if ideas:
-                    msg += f"**Content Ideas:**\n{ideas[:2000]}"
+                if "analysis" in result:
+                    msg += result["analysis"][:3000]
+                else:
+                    msg += f"Interest Score: {result.get('interest_score', 'N/A')}/100\n"
+                    msg += f"Peak Interest: {result.get('peak_interest', 'N/A')}\n\n"
+                    top = result.get("top_related", [])
+                    if top:
+                        msg += "**Related:**\n" + "\n".join(f"- {q}" for q in top[:8]) + "\n\n"
+                    ideas = result.get("post_ideas", "")
+                    if ideas:
+                        msg += f"**Content Ideas:**\n{ideas[:2000]}"
                 await update.message.reply_text(msg[:4000])
             else:
                 await update.message.reply_text(f"Error: {result.get('detail', str(result))}")
@@ -782,7 +815,7 @@ def main():
         try:
             topic = upcoming[0]["topic"]
             brief = json.loads(daily_brief())
-            trend_text = brief.get("content_brief", "") if brief.get("status") == "ok" else ""
+            trend_text = brief.get("content_brief", brief.get("brief", "")) if brief.get("status") == "ok" else ""
             prompt = topic
             if trend_text:
                 prompt = f"{topic}. Use this trending context if relevant: {trend_text[:500]}"
@@ -800,12 +833,38 @@ def main():
             save_pending_draft(topic, post_text, img_path)
 
             preview = f"**Preview — {topic}**\n\n{post_text[:2000]}"
-            if img_path:
-                preview += f"\n\n_(Image generated)_"
-            preview += "\n\nSend /approve to publish now, /reject to skip, or /draft to edit."
-            await update.message.reply_text(preview[:4000])
+            preview += "\n\nSend /approve to publish, /edit <feedback> to revise, or /reject to skip."
+
+            if img_path and Path(img_path).exists():
+                try:
+                    with open(img_path, "rb") as f:
+                        await update.message.reply_photo(photo=f, caption=preview[:1024])
+                    if len(preview) > 1024:
+                        await update.message.reply_text(preview[1024:4000])
+                except Exception as e:
+                    await update.message.reply_text(preview[:4000])
+                    await update.message.reply_text(f"(Image preview failed: {e})")
+            else:
+                await update.message.reply_text(preview[:4000])
         except Exception as e:
             await update.message.reply_text(f"Preview error: {e}")
+
+    async def preview_image_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Preview just the generated image for the pending draft."""
+        if not await require_auth(update, context): return
+        pending = load_pending_draft()
+        if not pending:
+            await update.message.reply_text("No pending draft. Use /preview to generate one first.")
+            return
+        img_path = pending.get("image_path")
+        if not img_path or not Path(img_path).exists():
+            await update.message.reply_text("No image generated for the current draft.")
+            return
+        try:
+            with open(img_path, "rb") as f:
+                await update.message.reply_photo(photo=f, caption="Preview image for the pending draft.")
+        except Exception as e:
+            await update.message.reply_text(f"Image preview failed: {e}")
 
     async def history_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Show recent posting history."""
@@ -853,7 +912,7 @@ def main():
         # Run pipeline in preview mode (generate but don't post)
         try:
             brief = json.loads(daily_brief())
-            trend_text = brief.get("content_brief", "") if brief.get("status") == "ok" else ""
+            trend_text = brief.get("content_brief", brief.get("brief", "")) if brief.get("status") == "ok" else ""
         except Exception:
             trend_text = ""
         prompt = topic
@@ -874,10 +933,19 @@ def main():
         save_pending_draft(topic, post_text, img_path)
 
         msg = f"**Preview — Next Scheduled Post**\n\nTopic: {topic}\n\n---\n\n{post_text[:2000]}"
-        if img_path:
-            msg += f"\n\nImage generated ✓"
-        msg += "\n\nSend /approve to publish or /reject to discard. Use /draft to edit the text."
-        await update.message.reply_text(msg[:4000])
+        msg += "\n\nSend /approve to publish, /edit <feedback> to revise, or /reject to skip."
+
+        if img_path and Path(img_path).exists():
+            try:
+                with open(img_path, "rb") as f:
+                    await update.message.reply_photo(photo=f, caption=msg[:1024])
+                if len(msg) > 1024:
+                    await update.message.reply_text(msg[1024:4000])
+            except Exception as e:
+                await update.message.reply_text(msg[:4000])
+                await update.message.reply_text(f"(Image preview failed: {e})")
+        else:
+            await update.message.reply_text(msg[:4000])
 
     async def approve_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Publish the pending draft."""
@@ -921,6 +989,100 @@ def main():
         cfg["topic_index"] = cfg.get("topic_index", 0) + 1
         save_schedule(cfg)
         await update.message.reply_text("Draft rejected and skipped. Use /preview to generate the next one.")
+
+    async def edit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Edit the pending draft with feedback."""
+        if not await require_auth(update, context): return
+        pending = load_pending_draft()
+        if not pending:
+            await update.message.reply_text("No pending draft to edit. Use /preview to generate one first.")
+            return
+        feedback = " ".join(context.args) if context.args else ""
+        if not feedback:
+            await update.message.reply_text(
+                "Tell me what to change. Example:\n"
+                "/edit make it shorter and more urgent\n"
+                "/edit focus on the data angle\n"
+                "/edit add a CTA about the tax credit"
+            )
+            return
+        topic = pending.get("topic", "content")
+        old_text = pending["content"]
+        prompt = (
+            f"Rewrite this LinkedIn post about '{topic}'. "
+            f"User feedback: {feedback}\n\n"
+            f"Original post:\n{old_text}\n\n"
+            f"Apply the user's feedback to improve it. Keep OLE brand voice: "
+            f"confident, data-driven, plain English. Keep it under 3000 chars."
+        )
+        await update.message.reply_text(f"Applying edit: {feedback[:200]}...")
+        try:
+            memory = build_memory_prompt()
+            if memory:
+                prompt += f"\n\n{memory}"
+            result = json.loads(draft_post(prompt))
+            if result.get("status") == "drafted":
+                new_text = result.get("content") or result.get("post", "")
+                save_pending_draft(topic, new_text, pending.get("image_path"))
+                preview = f"**Updated Draft — {topic}**\n\n{new_text[:2000]}"
+                preview += "\n\nSend /approve to publish, /edit <more feedback> to tweak further, or /reject to skip."
+                await update.message.reply_text(preview[:4000])
+            else:
+                await update.message.reply_text(f"Edit failed: {result.get('detail', '?')}")
+        except Exception as e:
+            await update.message.reply_text(f"Edit error: {e}")
+
+    async def remember_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Store a content preference."""
+        if not await require_auth(update, context): return
+        text = " ".join(context.args) if context.args else ""
+        if not text or "=" not in text:
+            await update.message.reply_text(
+                "Save a preference the bot will remember for future posts.\n\n"
+                "Examples:\n"
+                "/remember tone=more casual and conversational\n"
+                "/remember length=short, 2-3 paragraphs max\n"
+                "/remember style=lead with a statistic\n"
+                '/remember topics=prefer AI and automation angles\n\n'
+                "Use /forget <key> to remove one, or /preferences to see all."
+            )
+            return
+        key, _, value = text.partition("=")
+        key = key.strip().lower()
+        value = value.strip()
+        msg = add_preference(key, value)
+        await update.message.reply_text(f"{msg}\n\nIt will be applied to all future drafts and edits.")
+
+    async def preferences_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show all stored preferences."""
+        if not await require_auth(update, context): return
+        prefs = load_preferences()
+        if not prefs:
+            await update.message.reply_text("No preferences saved yet. Use /remember to add some.")
+            return
+        lines = ["**Stored Preferences:**"]
+        for p in prefs:
+            lines.append(f"- {p['key']}: {p['value']}")
+        lines.append("\nUse /remember <key>=<value> to add or update.")
+        lines.append("Use /forget <key> to remove one.")
+        await update.message.reply_text("\n".join(lines))
+
+    async def forget_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Remove a stored preference."""
+        if not await require_auth(update, context): return
+        key = " ".join(context.args) if context.args else ""
+        if not key:
+            await update.message.reply_text("Usage: /forget <key>  (e.g. /forget tone)")
+            return
+        key = key.strip().lower()
+        prefs = load_preferences()
+        before = len(prefs)
+        prefs = [p for p in prefs if p.get("key") != key]
+        if len(prefs) == before:
+            await update.message.reply_text(f"No preference found with key '{key}'.")
+            return
+        save_preferences(prefs)
+        await update.message.reply_text(f"Forgot preference '{key}'.")
 
     async def schedule_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not await require_auth(update, context): return
@@ -1026,7 +1188,7 @@ def main():
         if not await require_auth(update, context): return
         await update.message.reply_text("Checking trending topics...")
         try:
-            from research_server import daily_brief, trending_searches
+            from research_server import daily_brief
             brief = json.loads(daily_brief())
             us = brief.get("us_trends", [])
             bb = brief.get("barbados_trends", [])
@@ -1288,6 +1450,11 @@ You are the LinkedIn coordinator for Online Everywhere. You chat with the busine
     app.add_handler(CommandHandler("preview", preview_cmd))
     app.add_handler(CommandHandler("approve", approve_cmd))
     app.add_handler(CommandHandler("reject", reject_cmd))
+    app.add_handler(CommandHandler("edit", edit_cmd))
+    app.add_handler(CommandHandler("preview_image", preview_image_cmd))
+    app.add_handler(CommandHandler("remember", remember_cmd))
+    app.add_handler(CommandHandler("preferences", preferences_cmd))
+    app.add_handler(CommandHandler("forget", forget_cmd))
     app.add_handler(CommandHandler("history", history_cmd))
     app.add_handler(CommandHandler("hot", hot_cmd))
     app.add_handler(CommandHandler("mirror", mirror_cmd))
@@ -1296,11 +1463,12 @@ You are the LinkedIn coordinator for Online Everywhere. You chat with the busine
     app.add_handler(CommandHandler("examples", examples_cmd))
     app.add_handler(CommandHandler("events", events_cmd))
 
+    from telegram.ext import MessageHandler, filters
+
     # Photo handler — save images as premium reference
     app.add_handler(MessageHandler(filters.PHOTO, premium_photo_handler))
 
     # Catch-all for conversational messages (must be last)
-    from telegram.ext import MessageHandler, filters
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, chat_handler))
 
     # ── Start scheduler ──────────────────────────────────────────

@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-PROJECT="onlineeverywhere"
+PROJECT="linkedin-agent-501504"
 REGION="us-central1"
 SERVICE="ole-telegram-bot"
 
