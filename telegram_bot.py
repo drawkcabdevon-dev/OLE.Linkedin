@@ -553,6 +553,7 @@ def main():
             "/post_now           - Run pipeline now\n"
             "/examples save|list|delete - Premium quality references\n"
             "/events             - Upcoming calendar events\n"
+            "📸 Send a photo     - Save it as a premium style reference\n"
             "/status             - Health check\n"
             "/help               - This message"
         )
@@ -1172,6 +1173,47 @@ def main():
         else:
             await update.message.reply_text(cal)
 
+    async def premium_photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Save a photo sent by the user as a premium style reference."""
+        if not await require_auth(update, context): return
+
+        photo = update.message.photo[-1]
+        file = await photo.get_file()
+        caption = update.message.caption or ""
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        premium_dir = Path(SERVER_DIR).parent / "premium_examples"
+        premium_dir.mkdir(parents=True, exist_ok=True)
+        ext = "jpg" if not file.file_path or ".png" not in file.file_path else "png"
+        fname = f"premium_{ts}.{ext}"
+        local_path = premium_dir / fname
+        await file.download_to_drive(local_path)
+
+        import json
+        examples_path = Path(SERVER_DIR).parent / "premium_examples.json"
+        try:
+            examples = json.loads(examples_path.read_text())
+        except (FileNotFoundError, json.JSONDecodeError):
+            examples = []
+
+        entry = {
+            "type": "image",
+            "content": f"[Image saved as {fname}]",
+            "image_path": str(local_path),
+            "notes": caption or "Saved via Telegram photo",
+            "source_url": "",
+            "added_at": datetime.now(timezone.utc).isoformat(),
+        }
+        examples.append(entry)
+        examples_path.write_text(json.dumps(examples, indent=2))
+
+        msg = f"Saved as premium reference #{len(examples)}."
+        if caption:
+            msg += f"\nNotes: {caption}"
+        else:
+            msg += "\nTip: send next time with a caption describing what makes it high quality."
+        await update.message.reply_text(msg)
+
     async def chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Conversational handler for non-command messages."""
         if not update.message or not update.message.text:
@@ -1253,6 +1295,9 @@ You are the LinkedIn coordinator for Online Everywhere. You chat with the busine
     app.add_handler(CommandHandler("status", status_cmd))
     app.add_handler(CommandHandler("examples", examples_cmd))
     app.add_handler(CommandHandler("events", events_cmd))
+
+    # Photo handler — save images as premium reference
+    app.add_handler(MessageHandler(filters.PHOTO, premium_photo_handler))
 
     # Catch-all for conversational messages (must be last)
     from telegram.ext import MessageHandler, filters

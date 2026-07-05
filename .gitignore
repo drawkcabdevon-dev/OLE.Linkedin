@@ -1,11 +1,4 @@
-__pycache__/
-*.pyc
-.env
-data/
-assets/
-*.db
-author_id.json
-authorized_chats.json
-.DS_Store
-*.log
-node_modules/
+premium_examples/*.jpg
+premium_examples/*.png
+premium_examples/*.jpeg
+!premium_examples/.gitkeep
