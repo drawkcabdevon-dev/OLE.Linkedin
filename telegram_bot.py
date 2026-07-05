@@ -310,8 +310,17 @@ def generate_daily_ideas(count: int = 3) -> list[dict]:
         return []
 
 def generate_image_for_post(topic: str) -> str | None:
-    """Generate a social graphic and return the path, or None."""
+    """Generate a social graphic and return the path, or None.
+    Tries Stitch first (if configured), falls back to Pollinations.ai."""
     try:
+        stitch_key = os.getenv("STITCH_API_KEY", "")
+        stitch_project = os.getenv("STITCH_PROJECT_ID", "")
+        if stitch_key and stitch_project:
+            from image_server import stitch_generate_image
+            result = json.loads(stitch_generate_image(topic))
+            path = result.get("output_path")
+            if path:
+                return path
         result = json.loads(generate_social_graphic(topic, "modern"))
         return result.get("output_path")
     except Exception:

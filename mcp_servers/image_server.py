@@ -1,13 +1,13 @@
 """
 Image Generation MCP Server
-Generates social media graphics using Pollinations.ai (free, no key).
-NVIDIA API support ready for future use.
+Generates social media graphics using Pollinations.ai (free, no key)
+or Google Stitch (if STITCH_API_KEY is set).
 
 Usage:
   python image_server.py
 
 Free provider: Pollinations.ai — no API key required
-Future: NVIDIA NIM API when key is provided
+Premium: Google Stitch — set STITCH_API_KEY in .env
 """
 
 import json
@@ -31,6 +31,8 @@ ASSETS_DIR = DATA_DIR / "assets"
 ASSETS_DIR.mkdir(parents=True, exist_ok=True)
 DB_DIR = DATA_DIR
 
+STITCH_API_KEY = os.getenv("STITCH_API_KEY", "")
+STITCH_PROJECT_ID = os.getenv("STITCH_PROJECT_ID", "")
 
 POLLINATIONS_BASE = "https://image.pollinations.ai/prompt"
 
@@ -112,6 +114,107 @@ def _save_to_db(tool: str, campaign_id: str, prompt: str, image_path: str, post_
     )
     conn.commit()
     conn.close()
+
+
+def _call_stitch_api(prompt: str) -> bytes | None:
+    """Call Google Stitch API to generate a design and return its screenshot."""
+    stitch_key = STITCH_API_KEY or os.getenv("STITCH_API_KEY", "")
+    if not stitch_key:
+        return None
+
+    project_id = STITCH_PROJECT_ID or os.getenv("STITCH_PROJECT_ID", "")
+    if not project_id:
+        return None
+
+    try:
+        import subprocess, tempfile, base64, json
+
+        # 1. Generate screen from prompt
+        gen_cmd = [
+            "npx", "-y", "@_davideast/stitch-mcp", "tool", "generate_screen_from_text",
+            "-d", json.dumps({"projectId": project_id, "prompt": prompt, "n": 1})
+        ]
+        gen_result = subprocess.run(gen_cmd, capture_output=True, text=True, timeout=120)
+        gen_data = json.loads(gen_result.stdout)
+        screens = gen_data.get("screens", [])
+        if not screens:
+            return None
+        screen_id = screens[0].get("id", "")
+
+        # 2. Get screenshot
+        img_cmd = [
+            "npx", "-y", "@_davideast/stitch-mcp", "tool", "get_screen_image",
+            "-d", json.dumps({"projectId": project_id, "screenId": screen_id})
+        ]
+        img_result = subprocess.run(img_cmd, capture_output=True, text=True, timeout=60)
+        img_data = json.loads(img_result.stdout)
+        b64 = img_data.get("screenshotBase64", "")
+        if not b64:
+            return None
+        return base64.b64decode(b64)
+
+    except Exception as e:
+        import logging
+        logging.getLogger("image_server").warning(f"Stitch API error: {e}")
+        return None
+
+
+@server.tool()
+def stitch_generate_image(prompt: str, width: int = 1200, height: int = 1200) -> str:
+    """Generate an image using Google Stitch (replaces Pollinations).
+    
+    Requires STITCH_API_KEY and STITCH_PROJECT_ID in .env.
+    Stitch is a UI design generator — creates app/website screen designs
+    from text prompts, returned as screenshot images.
+    
+    Args:
+        prompt: Description of the design to generate.
+        width: Image width (default 1200).
+        height: Image height (default 1200).
+    """
+    stitch_key = STITCH_API_KEY or os.getenv("STITCH_API_KEY", "")
+    if not stitch_key:
+        return json.dumps({"status": "error", "detail": "STITCH_API_KEY not set in .env"})
+
+    project_id = STITCH_PROJECT_ID or os.getenv("STITCH_PROJECT_ID", "")
+    if not project_id:
+        return json.dumps({"status": "error", "detail": "STITCH_PROJECT_ID not set in .env"})
+
+    try:
+        image_data = _call_stitch_api(prompt)
+        if image_data is None:
+            return json.dumps({"status": "error", "detail": "Stitch API returned no image"})
+
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"stitch_{ts}.png"
+        out_path = _save_image(image_data, filename)
+
+        result = {
+            "status": "generated",
+            "output_path": str(out_path),
+            "size_bytes": len(image_data),
+            "width": width,
+            "height": height,
+            "provider": "stitch",
+        }
+        _save_to_db("stitch", "custom", prompt, str(out_path), prompt)
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        return json.dumps({"status": "error", "detail": str(e)})
+
+
+@server.tool()
+def stitch_list_projects() -> str:
+    """List all accessible Stitch projects."""
+    import subprocess, json
+    try:
+        r = subprocess.run(
+            ["npx", "-y", "@_davideast/stitch-mcp", "tool", "list_projects"],
+            capture_output=True, text=True, timeout=30
+        )
+        return r.stdout
+    except Exception as e:
+        return json.dumps({"status": "error", "detail": str(e)})
 
 
 @server.tool()
