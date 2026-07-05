@@ -244,7 +244,7 @@ if SERVER_DIR not in sys.path:
     sys.path.insert(0, SERVER_DIR)
 
 from linkedin_server import create_post, post_image, post_multi_image
-from content_server import draft_post, generate_carousel_script
+from content_server import draft_post, generate_carousel_script, add_premium_example, list_premium_examples, delete_premium_example
 from image_server import generate_social_graphic, generate_carousel_images
 from research_server import trending_searches, daily_brief
 from local_server import save_draft, log_published, list_published
@@ -551,6 +551,8 @@ def main():
             "/schedule mode auto|draft - Auto-post or review\n"
             "/schedule topics ... - Comma-separated topics\n"
             "/post_now           - Run pipeline now\n"
+            "/examples save|list|delete - Premium quality references\n"
+            "/events             - Upcoming calendar events\n"
             "/status             - Health check\n"
             "/help               - This message"
         )
@@ -1109,6 +1111,67 @@ def main():
         except Exception as e:
             await update.message.reply_text(f"Pipeline error: {e}")
 
+    async def examples_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Save, list, or delete premium quality reference posts."""
+        if not await require_auth(update, context): return
+
+        args = context.args
+        if not args:
+            examples = json.loads(list_premium_examples())
+            if isinstance(examples, list) and len(examples) == 0:
+                text = "No premium examples saved yet.\n\n"
+                text += "/examples save <post text> — save this post as a quality benchmark\n"
+                text += "/examples list — view saved examples\n"
+                text += "/examples delete <index> — remove an example\n"
+                text += "/events — upcoming events used for content context"
+            else:
+                text = "Saved premium examples:\n\n"
+                for ex in examples:
+                    text += f"[{ex['index']}] {ex['preview']}...\n"
+                    if ex.get('notes'):
+                        text += f"   Notes: {ex['notes']}\n"
+                    text += "\n"
+                text += "Usage: /examples save <text> | /examples delete <index>"
+            await update.message.reply_text(text)
+            return
+
+        cmd = args[0].lower()
+        if cmd == "save":
+            body = " ".join(args[1:])
+            if not body:
+                await update.message.reply_text("Usage: /examples save <post text>")
+                return
+            result = json.loads(add_premium_example(body, "Saved via Telegram"))
+            await update.message.reply_text(
+                f"Saved as premium example #{result.get('total_examples', '?')}."
+            )
+        elif cmd == "list":
+            examples = json.loads(list_premium_examples())
+            text = "Premium examples:\n\n"
+            for ex in examples:
+                text += f"[{ex['index']}] {ex['preview']}...\n"
+                if ex.get('notes'):
+                    text += f"   Notes: {ex['notes']}\n\n"
+            await update.message.reply_text(text or "No examples saved.")
+        elif cmd == "delete":
+            try:
+                idx = int(args[1])
+                result = json.loads(delete_premium_example(idx))
+                await update.message.reply_text(result.get("status", "Done."))
+            except (IndexError, ValueError):
+                await update.message.reply_text("Usage: /examples delete <index>")
+        else:
+            await update.message.reply_text("Usage: /examples save|list|delete")
+
+    async def events_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show upcoming events used for content context."""
+        from content_server import _upcoming_events
+        cal = _upcoming_events(60)
+        if not cal:
+            await update.message.reply_text("No upcoming events in the next 60 days.")
+        else:
+            await update.message.reply_text(cal)
+
     async def chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Conversational handler for non-command messages."""
         if not update.message or not update.message.text:
@@ -1188,6 +1251,8 @@ You are the LinkedIn coordinator for Online Everywhere. You chat with the busine
     app.add_handler(CommandHandler("mirror", mirror_cmd))
     app.add_handler(CommandHandler("post_now", post_now))
     app.add_handler(CommandHandler("status", status_cmd))
+    app.add_handler(CommandHandler("examples", examples_cmd))
+    app.add_handler(CommandHandler("events", events_cmd))
 
     # Catch-all for conversational messages (must be last)
     from telegram.ext import MessageHandler, filters
