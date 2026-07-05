@@ -1,68 +1,97 @@
-# 🤖 Modular Telegram Job Bot (Barbados Edition)
+# OLE Social Agent
 
-An autonomous job-application assistant designed to run on a tablet (PicoClaw/Termux) and automate the entire job hunt process in Barbados.
+AI-powered social media management agent for **Online Everywhere** (onlineeverywhere.com). Manages LinkedIn content creation, scheduling, publishing, and lead generation — all through a Telegram bot interface.
 
-## 🚀 Features
+## Features
 
-- **Multi-Source Scraping:** Automatically monitors:
-  - **LinkedIn:** Real-time search for "Marketing" roles in Barbados using authenticated session state.
-  - **CaribbeanJobs:** Regional professional vacancies.
-  - **BajanJobs:** Specifically targeting local Barbadian job boards.
-- **Agentic AI Cover Letters:** Uses **Google Gemini API** and your uploaded `cv_text.txt` to write personalized, professional cover letters for every job lead.
-- **Gmail Automation:** Integrates with **Google Workspace CLI (`gws`)** to create draft emails headlessly, allowing for quick manual review and sending.
-- **Telegram Interface:** Interactive bot interface with buttons to browse jobs, generate letters, and draft emails from anywhere.
+- **Content Pipeline** — Gemini 2.5 Flash drafts optimized for Barbados SMEs
+- **Auto-Scheduling** — Daily posts at 14:00 UTC via APScheduler (local) or Cloud Scheduler (Cloud Run)
+- **Preview & Approve** — Draft mode queues posts for review before publishing
+- **Trends Integration** — Google Trends + Gemini for data-driven topic selection
+- **Competitor Mirroring** — Analyze competitor posts, create counter-content
+- **Image Generation** — Pollinations.ai free-tier visuals for posts
+- **Lead Tracking** — SQLite-based CRM for LinkedIn outreach
+- **Calendar Management** — Planned content calendar with rotation
 
-## 🛠️ Setup
+## Commands
 
-### 1. Prerequisites
-- Node.js (v18+)
-- [Google Workspace CLI](https://github.com/googleworkspace/cli) installed and authenticated.
-- A Telegram Bot Token from [@BotFather](https://t.me/BotFather).
-- A Google Gemini API Key.
+| Command | Description |
+|---------|-------------|
+| `/draft <topic>` | Generate a LinkedIn post draft |
+| `/brainstorm <topic>` | 8 rapid-fire content ideas |
+| `/planned` | Upcoming 7-day calendar |
+| `/preview` | Preview pending draft |
+| `/approve` | Publish pending draft |
+| `/reject` | Skip pending draft |
+| `/hot` | Google Trends top topic → instant draft |
+| `/mirror <topic>` | Competitor analysis + counter-content |
+| `/history` | Last 10 published posts |
+| `/post <text>` | Post directly to LinkedIn |
+| `/post_image` | Post with image to LinkedIn |
+| `/schedule` | Manage auto-schedule (on/off/time/mode/topics) |
+| `/post_now` | Run pipeline immediately |
+| `/status` | System health check |
 
-### 2. Configuration
-Create a `.env` file in the root directory:
-```env
-TELEGRAM_BOT_TOKEN=your_token_here
-GEMINI_API_KEY=your_gemini_key_here
-OWNER_ID=your_telegram_id_here
-```
+## Quick Start
 
-### 3. Personal Data
-- **`cv_text.txt`:** Place your full CV/Resume text here. The bot uses this to ground the AI-generated cover letters in your actual experience.
-- **`linkedin_state.json`:** Export your LinkedIn session cookies to this file to allow the scraper to bypass login screens.
-
-### 4. Installation
 ```bash
-npm install
-npx playwright install chromium
+# Install dependencies
+pip install -r requirements.txt
+
+# Configure environment
+cp .env.template ~/.social-agent/.env  # edit with your tokens
+
+# Run bot (polling mode)
+python telegram_bot.py
+
+# Or via Docker
+docker compose up -d
 ```
 
-## 📱 Deployment (Tablet / PicoClaw)
+## Deployment
 
-This bot is optimized for low-resource environments like Amazon Fire Tablets running Termux.
+### Local (Polling)
+```bash
+python telegram_bot.py
+```
 
-1. **Clone the repo:**
-   ```bash
-   git clone https://github.com/drawkcabdevon-dev/tele-bots.git
-   ```
-2. **Install dependencies:**
-   ```bash
-   pkg update && pkg install nodejs git
-   npm install
-   ```
-3. **Run in background:**
-   ```bash
-   nohup node index.js &
-   ```
+### Cloud Run (Webhook)
+1. Store secrets in Secret Manager
+2. Set `WEBHOOK_URL` env var pointing to your Cloud Run URL
+3. Deploy: `gcloud builds submit`
+4. Register webhook with Telegram API
 
-## 🏗️ Project Structure
-- `modules/jobs/`: Core logic for scraping, cover letter generation, and Gmail drafting.
-- `config/`: Centralized configuration management.
-- `index.js`: Main bot entry point and Telegram command routing.
+See `deploy.sh` for the full deployment script.
 
-## 🇧🇧 Barbados Focus
-The bot is specifically tuned to the Barbadian job market, prioritizing local boards and filtering for relevant regional roles in Marketing, Sales, and Digital sectors.
+## Project Structure
 
----
-*Created with ❤️ for autonomous career growth.*
+```
+├── telegram_bot.py          # Main Telegram bot (conversational + scheduled)
+├── mcp_servers/
+│   ├── linkedin_server.py   # LinkedIn API (post, image, search)
+│   ├── content_server.py    # Gemini 2.5 Flash content generation
+│   ├── image_server.py      # Pollinations.ai image generation
+│   ├── local_server.py      # SQLite (drafts, published, leads, calendar)
+│   ├── research_server.py   # Google Trends + Gemini research
+│   └── design_server.py     # HyperFrames/Seedance/Higgsfield motion graphics
+├── templates/               # LinkedIn post templates, HyperFrames HTML
+├── skills/                  # opencode agent skills
+├── Dockerfile               # Cloud Run container
+├── cloudbuild.yaml          # Cloud Build CI/CD
+└── deploy.sh                # One-shot deployment script
+```
+
+## Environment Variables
+
+| Variable | Source | Required |
+|----------|--------|----------|
+| `TELEGRAM_BOT_TOKEN` | @BotFather | Yes |
+| `LINKEDIN_ACCESS_TOKEN` | LinkedIn OAuth | Yes |
+| `LINKEDIN_ORG_ID` | LinkedIn company page | Yes (125564340) |
+| `GOOGLE_API_KEY` | Google AI Studio | Yes (Gemini) |
+| `WEBHOOK_URL` | Cloud Run URL | For webhook mode |
+| `SCHEDULER_SECRET` | Your secret | For Cloud Scheduler |
+
+## License
+
+Online Everywhere — Data-Driven Marketing, Accelerated by AI
