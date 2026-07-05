@@ -1,0 +1,27 @@
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['build', '-t', 'us-central1-docker.pkg.dev/$PROJECT_ID/ole-agent/telegram-bot:$COMMIT_SHA', '.']
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'us-central1-docker.pkg.dev/$PROJECT_ID/ole-agent/telegram-bot:$COMMIT_SHA']
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'deploy'
+      - 'ole-telegram-bot'
+      - '--image=us-central1-docker.pkg.dev/$PROJECT_ID/ole-agent/telegram-bot:$COMMIT_SHA'
+      - '--region=us-central1'
+      - '--platform=managed'
+      - '--allow-unauthenticated'
+      - '--memory=1Gi'
+      - '--min-instances=1'
+      - '--max-instances=1'
+      - '--concurrency=1'
+      - '--no-cpu-throttling'
+      - '--set-env-vars=WEBHOOK_URL=$_WEBHOOK_URL,LINKEDIN_ORG_ID=125564340,SCHEDULER_SECRET=$_SCHEDULER_SECRET'
+      - '--set-secrets=TELEGRAM_BOT_TOKEN=telegram-bot-token:latest,GOOGLE_API_KEY=gemini-api-key:latest,LINKEDIN_ACCESS_TOKEN=linkedin-access-token:latest'
+substitutions:
+  _WEBHOOK_URL: 'https://ole-telegram-bot-nsr4eqas3a-uc.a.run.app'
+  _SCHEDULER_SECRET: 'ole-scheduler-2024'
+images:
+  - 'us-central1-docker.pkg.dev/$PROJECT_ID/ole-agent/telegram-bot:$COMMIT_SHA'

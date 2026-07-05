@@ -24,3 +24,7 @@ reportlab>=4.0.0
 # Research
 pytrends>=4.9.0
 pandas>=2.0.0
+
+# Web server (Cloud Run webhook mode)
+fastapi>=0.115.0
+uvicorn>=0.30.0

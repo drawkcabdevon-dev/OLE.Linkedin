@@ -1189,8 +1189,60 @@ You are the LinkedIn coordinator for Online Everywhere. You chat with the busine
     scheduler.start()
     reschedule_job()
 
-    logger.info("Bot started, polling...")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    logger.info("Bot initialized, starting web server...")
+
+    # Determine mode: webhook (Cloud Run) or polling (local)
+    WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
+    PORT = int(os.getenv("PORT", "8080"))
+
+    if WEBHOOK_URL:
+        # ── Webhook mode (Cloud Run) ────────────────────────────────
+        from fastapi import FastAPI, Request
+        import uvicorn
+
+        api = FastAPI(title="OLE LinkedIn Coordinator")
+
+        @api.on_event("startup")
+        async def startup():
+            await app.initialize()
+            await app.start()
+            hook = f"{WEBHOOK_URL}/webhook"
+            await app.bot.set_webhook(url=hook)
+            logger.info(f"Webhook set: {hook}")
+
+        @api.on_event("shutdown")
+        async def shutdown():
+            await app.stop()
+            scheduler.shutdown(wait=False)
+
+        @api.post("/webhook")
+        async def webhook(request: Request):
+            data = await request.json()
+            update = Update.de_json(data, app.bot)
+            await app.process_update(update)
+            return {"ok": True}
+
+        @api.get("/health")
+        async def health():
+            sched = "running" if scheduler.running else "stopped"
+            return {"status": "ok", "scheduler": sched}
+
+        @api.post("/scheduler")
+        async def scheduler_endpoint(request: Request):
+            """Triggered by Cloud Scheduler for daily posts."""
+            body = await request.json()
+            secret = body.get("secret", "")
+            if secret != os.getenv("SCHEDULER_SECRET", ""):
+                from fastapi.responses import JSONResponse
+                return JSONResponse({"error": "unauthorized"}, status_code=401)
+            run_content_pipeline(app)
+            return {"status": "ok"}
+
+        uvicorn.run(api, host="0.0.0.0", port=PORT, log_level="info")
+    else:
+        # ── Polling mode (local dev) ─────────────────────────────
+        logger.info("Bot started, polling...")
+        app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     main()

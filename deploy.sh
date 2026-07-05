@@ -1,94 +1,73 @@
 #!/bin/bash
 set -e
 
-# Online Everywhere — Deploy LinkedIn Agent to VM
-# Usage: ./deploy.sh <vm-ip> <ssh-user>
-# Example: ./deploy.sh 35.206.80.189 devon
+PROJECT="onlineeverywhere"
+REGION="us-central1"
+SERVICE="ole-telegram-bot"
 
-VM_IP="${1:-35.206.80.189}"
-SSH_USER="${2:-devon}"
-REMOTE_DIR="/home/${SSH_USER}/social-agent"
-LOCAL_DIR="$(cd "$(dirname "$0")" && pwd)"
+echo "==> Setting project: $PROJECT"
+gcloud config set project "$PROJECT"
 
-echo "=== Deploying Online Everywhere LinkedIn Agent ==="
-echo "VM: ${SSH_USER}@${VM_IP}"
-echo "Local: ${LOCAL_DIR} -> Remote: ${REMOTE_DIR}"
+echo "==> Enabling APIs"
+gcloud services enable artifactregistry.googleapis.com run.googleapis.com cloudscheduler.googleapis.com secretmanager.googleapis.com
 
-# 1. Rsync the entire social-agent directory (excluding heavy/cache files)
-echo "--- Syncing files ---"
-rsync -avz \
-    --exclude='__pycache__/' \
-    --exclude='*.pyc' \
-    --exclude='.git/' \
-    --exclude='node_modules/' \
-    --exclude='.env' \
-    --exclude='data/' \
-    --exclude='assets/' \
-    -e "ssh -o StrictHostKeyChecking=no" \
-    "${LOCAL_DIR}/" "${SSH_USER}@${VM_IP}:${REMOTE_DIR}/"
+echo "==> Creating Artifact Registry repo (if needed)"
+gcloud artifacts repositories create ole-agent \
+  --repository-format=docker \
+  --location="$REGION" \
+  --description="OLE Agent Docker images" 2>/dev/null || echo "Repo already exists"
 
-# 2. SSH in to set up
-echo "--- Setting up on VM ---"
-ssh -t "${SSH_USER}@${VM_IP}" "
-set -e
+echo "==> Checking secrets in Secret Manager"
+for SECRET in telegram-bot-token gemini-api-key linkedin-access-token; do
+  if gcloud secrets describe "$SECRET" &>/dev/null; then
+    echo "  $SECRET exists"
+  else
+    echo "  WARNING: $SECRET not found in Secret Manager. Create it first:"
+    echo "    echo -n 'your-value' | gcloud secrets create $SECRET --data-file=- --replication-policy=automatic"
+  fi
+done
 
-echo 'Creating data and assets directories...'
-mkdir -p ${REMOTE_DIR}/data ${REMOTE_DIR}/assets
+echo "==> Granting Cloud Run access to secrets"
+PROJECT_NUM=$(gcloud projects describe "$PROJECT" --format="value(projectNumber)")
+SERVICE_ACCOUNT="$PROJECT_NUM-compute@developer.gserviceaccount.com"
+for SECRET in telegram-bot-token gemini-api-key linkedin-access-token; do
+  gcloud secrets add-iam-policy-binding "$SECRET" \
+    --member="serviceAccount:$SERVICE_ACCOUNT" \
+    --role="roles/secretmanager.secretAccessor" 2>/dev/null || true
+done
 
-echo 'Installing Python dependencies...'
-cd ${REMOTE_DIR}
-pip3 install --user -r requirements.txt 2>/dev/null || pip3 install -r requirements.txt
+echo "==> Building and deploying to Cloud Run"
+gcloud builds submit \
+  --substitutions=_WEBHOOK_URL="https://$SERVICE-nsr4eqas3a-uc.$REGION.run.app",_SCHEDULER_SECRET="ole-scheduler-2024"
 
-echo 'Setting up .env file...'
-if [ ! -f ${REMOTE_DIR}/.env ]; then
-    cat > ${REMOTE_DIR}/.env << 'ENVEOF'
-# Linkedin
-LINKEDIN_ACCESS_TOKEN=
-LINKEDIN_ORG_ID=125564340
+echo "==> Getting service URL"
+SERVICE_URL=$(gcloud run services describe "$SERVICE" --region="$REGION" --format="value(status.url)")
+echo "Service URL: $SERVICE_URL"
 
-# Google Gemini
-GOOGLE_API_KEY=
+echo "==> Registering webhook with Telegram"
+WEBHOOK_URL="${SERVICE_URL}/webhook"
+echo "Setting webhook to: $WEBHOOK_URL"
+echo "Run this after deploy:"
+echo "  curl -X POST https://api.telegram.org/bot<TOKEN>/setWebhook?url=$WEBHOOK_URL"
 
-# Telegram
-TELEGRAM_BOT_TOKEN=
+echo "==> Creating Cloud Scheduler for daily post at 14:00 UTC"
+gcloud scheduler jobs create http ole-daily-post \
+  --location="$REGION" \
+  --schedule="0 14 * * *" \
+  --uri="${SERVICE_URL}/scheduler" \
+  --http-method=POST \
+  --headers="Content-Type=application/json" \
+  --message-body='{"secret":"ole-scheduler-2024"}' \
+  --oidc-service-account-email="$SERVICE_ACCOUNT" \
+  --oidc-token-audience="${SERVICE_URL}" 2>/dev/null || \
+  gcloud scheduler jobs update http ole-daily-post \
+    --schedule="0 14 * * *" \
+    --uri="${SERVICE_URL}/scheduler" \
+    --http-method=POST \
+    --message-body='{"secret":"ole-scheduler-2024"}'
 
-# Data directory (leave as-is for Docker, or change for local)
-OLE_DATA_DIR=${REMOTE_DIR}
-
-# Optional
-NVIDIA_API_KEY=
-OPENAI_API_KEY=
-ENVEOF
-    echo 'Created .env — EDIT IT with your tokens: nano ${REMOTE_DIR}/.env'
-else
-    echo '.env already exists, keeping it'
-fi
-
-echo ''
-echo '=== Setup complete ==='
-echo ''
-echo 'Next steps:'
-echo '  1. Edit .env: nano ${REMOTE_DIR}/.env'
-echo '  2. Test the bot: cd ${REMOTE_DIR} && python3 telegram_bot.py'
-echo '  3. Or run as service (see HANDOFF.md)'
-echo ''
-echo 'To run 24/7 as a systemd service:'
-echo '  sudo tee /etc/systemd/system/ole-agent.service << EOF'
-echo '[Unit]'
-echo 'Description=Online Everywhere LinkedIn Telegram Bot'
-echo 'After=network.target'
-echo ''
-echo '[Service]'
-echo 'Type=simple'
-echo 'User=${SSH_USER}'
-echo 'WorkingDirectory=${REMOTE_DIR}'
-echo 'ExecStart=$(which python3) ${REMOTE_DIR}/telegram_bot.py'
-echo 'Restart=always'
-echo 'EnvironmentFile=${REMOTE_DIR}/.env'
-echo ''
-echo '[Install]'
-echo 'WantedBy=multi-user.target'
-echo 'EOF'
-echo '  sudo systemctl daemon-reload && sudo systemctl enable --now ole-agent'
-"
-echo "=== Deployment complete ==="
+echo "==> All done!"
+echo "Service: $SERVICE_URL"
+echo "Health:  ${SERVICE_URL}/health"
+echo ""
+echo "To test: curl ${SERVICE_URL}/health"
