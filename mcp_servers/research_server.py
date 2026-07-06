@@ -221,7 +221,10 @@ def analyze_topic(keyword: str) -> str:
             if rq["rising"] is not None and not rq["rising"].empty:
                 rising_q = [{"query": r["query"], "value": r.get("value", "")} for _, r in rq["rising"].head(10).iterrows()]
 
-        prompt = f"""You are a content strategist for Online Everywhere (Barbados digital marketing).
+        # Try Gemini for post ideas, fall back to trends-only response
+        analysis = ""
+        try:
+            prompt = f"""You are a content strategist for Online Everywhere (Barbados digital marketing).
 Google Trends data for '{keyword}':
 - Interest score (0-100): {avg_interest}
 - Peak: {peak}
@@ -229,10 +232,12 @@ Google Trends data for '{keyword}':
 - Rising: {json.dumps(rising_q[:10])}
 
 Generate 3 high-impact LinkedIn post concepts targeting Barbados SMEs.
-For each: post hook, data point to include, CTA (always drive to onlineeverywhere.com).
+For each: post hook, data point to include, CTA (always drive to onlineverywhere.com).
 Be specific and quantified. No fluff."""
 
-        analysis = call_gemini(prompt, temperature=0.5)
+            analysis = call_gemini(prompt, temperature=0.5)
+        except Exception as e:
+            analysis = f"[Gemini unavailable: {e}]\n\nUse the trends data above to craft your own post, or try /draft {keyword} to generate one."
 
         return json.dumps({
             "status": "ok",
