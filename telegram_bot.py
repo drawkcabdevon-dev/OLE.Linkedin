@@ -169,8 +169,8 @@ def is_authorized(chat_id: int) -> bool:
 # ── Schedule config ─────────────────────────────────────────────────
 
 DEFAULT_SCHEDULE = {
-    "enabled": False,
-    "time": "12:00",
+    "enabled": True,
+    "time": "14:00",
     "days": "daily",
     "mode": "draft",       # "draft" = preview + approve, "auto" = post directly
     "topics": [
@@ -180,6 +180,7 @@ DEFAULT_SCHEDULE = {
         "Barbados SEO tips",
         "Barbados social media marketing",
         "Barbados AI for business",
+        "Barbados website speed",
     ],
     "topic_index": 0,
 }
