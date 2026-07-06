@@ -82,8 +82,11 @@ def gemini_chat(user_text: str, system_prompt: str) -> str | None:
         return None
 
 def detect_intent(text: str) -> str:
-    """Simple intent matching to avoid Gemini calls for common queries."""
+    """Simple intent matching. Skips for longer conversational messages."""
     t = text.lower().strip()
+    # Longer messages are conversational — let Gemini handle them
+    if len(t.split()) > 4:
+        return "unknown"
     if t in ("hi", "hello", "hey", "sup", "yo", "what's up", "good morning", "good evening"):
         return "greeting"
     if any(w in t for w in ("what can you do", "help", "commands", "capabilities", "what do you do")):
@@ -131,6 +134,7 @@ AUTHORIZED_CHATS_FILE = BASE / "authorized_chats.json"
 SCHEDULE_CONFIG_FILE = BASE / "schedule_config.json"
 PENDING_DRAFT_FILE = BASE / "pending_draft.json"
 FEEDBACK_MEMORY_FILE = BASE / "preferences.json"
+CONVERSATION_MEMORY_FILE = BASE / "conversation_memory.json"
 NOTIFY_CHAT_ID = None  # Set when /authorize runs
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()  # For direct HTTP notify
 
@@ -165,6 +169,17 @@ def save_authorized_chats(chats: set[int]):
 
 def is_authorized(chat_id: int) -> bool:
     return chat_id in load_authorized_chats()
+
+# ── Conversation memory ──────────────────────────────────────────────
+
+def load_conversation_memory() -> list[dict]:
+    if CONVERSATION_MEMORY_FILE.exists():
+        return json.loads(CONVERSATION_MEMORY_FILE.read_text())
+    return []
+
+def save_conversation_memory(memory: list[dict]):
+    CONVERSATION_MEMORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    CONVERSATION_MEMORY_FILE.write_text(json.dumps(memory[-10:]))
 
 # ── Schedule config ─────────────────────────────────────────────────
 
@@ -284,7 +299,12 @@ def draft_content(topic: str) -> dict:
 
 def research_trends_data() -> dict:
     try:
-        return json.loads(trending_searches())
+        result = json.loads(trending_searches())
+        if result.get("status") == "ok":
+            return result
+        # Fallback: try US trends
+        result = json.loads(trending_searches(region="united_states"))
+        return result
     except Exception as e:
         return {"status": "error", "detail": str(e)}
 
@@ -697,22 +717,38 @@ def main():
 
     async def trends_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not await require_auth(update, context): return
-        await update.message.reply_text("Fetching trending searches...")
-        try:
-            result = research_trends_data()
-            if result.get("status") == "ok":
-                trends = result.get("trends", [])
-                if trends:
-                    lines = ["**Trending Searches Now:**\n"]
-                    for i, t in enumerate(trends[:10], 1):
-                        lines.append(f"{i}. {t}")
-                    await update.message.reply_text("\n".join(lines))
+        topic = " ".join(context.args) if context.args else ""
+        if topic:
+            await update.message.reply_text(f"Researching trends about: {topic}...")
+            try:
+                from research_server import analyze_topic
+                result = json.loads(analyze_topic(topic))
+                if result.get("status") == "ok":
+                    msg = f"**Research: {topic}**\n\n"
+                    research = result.get("research", result.get("brief", result.get("content", "")))
+                    msg += research[:3000]
+                    await update.message.reply_text(msg[:4000])
                 else:
-                    await update.message.reply_text("No trends found.")
-            else:
-                await update.message.reply_text(f"Error: {result.get('detail', str(result))}")
-        except Exception as e:
-            await update.message.reply_text(f"Error: {e}")
+                    await update.message.reply_text(f"Error: {result.get('detail', str(result))}")
+            except Exception as e:
+                await update.message.reply_text(f"Error: {e}")
+        else:
+            await update.message.reply_text("Fetching trending searches...")
+            try:
+                result = research_trends_data()
+                if result.get("status") == "ok":
+                    trends = result.get("trends", [])
+                    if trends:
+                        lines = ["**Trending Searches Now:**\n"]
+                        for i, t in enumerate(trends[:10], 1):
+                            lines.append(f"{i}. {t}")
+                        await update.message.reply_text("\n".join(lines))
+                    else:
+                        await update.message.reply_text("No trends found.")
+                else:
+                    await update.message.reply_text(f"Error: {result.get('detail', str(result))}")
+            except Exception as e:
+                await update.message.reply_text(f"Error: {e}")
 
     async def research_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not await require_auth(update, context): return
@@ -1430,7 +1466,17 @@ def main():
         # 2. Try Gemini with rate limiting
         try:
             from content_server import OLE_SYSTEM_PROMPT
-            # Include recent posting history as context
+
+            # Conversation memory — last few exchanges for context
+            conv_memory = load_conversation_memory()
+            conv_context = ""
+            if conv_memory:
+                conv_context = "\n\nRecent conversation history (most recent last):\n"
+                for turn in conv_memory[-6:]:
+                    conv_context += f"User: {turn['user']}\n"
+                    conv_context += f"You: {turn['bot']}\n"
+
+            # Recent posting history
             recent_history = ""
             try:
                 hist = json.loads(list_published(platform="linkedin", limit=5))
@@ -1443,7 +1489,7 @@ def main():
             except Exception:
                 pass
 
-            # Include upcoming schedule
+            # Upcoming schedule
             schedule_context = ""
             try:
                 upc = next_scheduled_posts(3)
@@ -1454,15 +1500,26 @@ def main():
             except Exception:
                 pass
 
-            system_prompt = OLE_SYSTEM_PROMPT + recent_history + schedule_context + """
+            system_prompt = OLE_SYSTEM_PROMPT + recent_history + schedule_context + conv_context + """
 
-You are the LinkedIn coordinator for Online Everywhere. You chat with the business owner. Be conversational, direct, and helpful."""
+You are the LinkedIn coordinator for Online Everywhere. You chat with the business owner. Be conversational, direct, and helpful.
+Maintain context from the conversation history above — if the user follows up on a previous topic, acknowledge it.
+When the user asks you to do something actionable (research a company, draft about a topic, check trends, etc.), respond enthusiastically, show you understand what they want, and provide a single ready-to-use slash command with their topic already filled in — for example:
+  - Research: "Great idea! Run /research GovTech in Barbados digital transformation and I'll pull together a full research brief for you."
+  - Draft: "Let's make this happen. Use /draft GovTech digital transformation in Barbados to generate a post."
+  - Trends: "Use /trends to see what's trending right now in Barbados."
+  - Check/post: "Use /post GovTech and digital transformation in Barbados to publish immediately."
+Do NOT just say "use the right slash command" — connect it to what they said and fill in their topic."""
 
             reply = gemini_chat(user_text, system_prompt)
             if reply:
                 await update.message.reply_text(reply[:3000])
+                # Save to conversation memory
+                conv_memory.append({"user": user_text, "bot": reply[:500]})
+                save_conversation_memory(conv_memory)
                 return
-        except Exception:
+        except Exception as e:
+            logger.warning(f"Gemini chat failed: {e}")
             pass
 
         # 3. Fallback when Gemini is rate limited or unavailable
