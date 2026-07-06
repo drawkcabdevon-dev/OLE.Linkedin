@@ -1,3 +1,11 @@
+__pycache__/
+*.pyc
+bot.log
+agents/
+agents_ole_tmp*/
+adk_agent.py
+agent_engine_client.py
+deploy_adk.py
 premium_examples/*.jpg
 premium_examples/*.png
 premium_examples/*.jpeg

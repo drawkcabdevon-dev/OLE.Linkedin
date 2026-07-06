@@ -609,29 +609,63 @@ def main():
     async def draft(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not await require_auth(update, context): return
         topic = " ".join(context.args) if context.args else "digital marketing for Barbados SMEs"
-        await update.message.reply_text(f"Drafting post about: {topic}...")
+        await update.message.reply_text(f"Generating lead-gen optimized post about: {topic}...")
         try:
             result = draft_content(topic)
-            if result.get("status") == "drafted":
-                await update.message.reply_text(f"Draft:\n\n{(result.get('content') or result.get('post', ''))[:3000]}")
+            if result.get("status") != "drafted":
+                await update.message.reply_text(f"Draft failed: {result.get('detail', '?')}")
+                return
+            post_text = result.get("content") or result.get("post", "")
+            if not post_text:
+                await update.message.reply_text("Generated content was empty.")
+                return
+            img_path = generate_image_for_post(topic)
+            save_pending_draft(topic, post_text, img_path)
+            msg = f"**Draft — {topic}**\n\n{post_text[:2000]}"
+            msg += "\n\nSend /approve to publish, /edit <feedback> to revise, or /reject to skip."
+            if img_path and Path(img_path).exists():
+                try:
+                    with open(img_path, "rb") as f:
+                        await update.message.reply_photo(photo=f, caption=msg[:1024])
+                    if len(msg) > 1024:
+                        await update.message.reply_text(msg[1024:4000])
+                except Exception as e:
+                    await update.message.reply_text(msg[:4000])
+                    await update.message.reply_text(f"(Image preview failed: {e})")
             else:
-                await update.message.reply_text(friendly_error(result))
+                await update.message.reply_text(msg[:4000])
         except Exception as e:
-            await update.message.reply_text(friendly_error({"detail": str(e)}))
+            await update.message.reply_text(f"Error: {e}")
 
     async def post_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not await require_auth(update, context): return
-        text = " ".join(context.args) if context.args else ""
-        if not text:
-            await update.message.reply_text("Usage: /post <text>")
+        topic = " ".join(context.args) if context.args else ""
+        if not topic:
+            await update.message.reply_text("Usage: /post <topic>")
             return
-        await update.message.reply_text("Posting to LinkedIn...")
+        await update.message.reply_text(f"Generating lead-gen optimized post about: {topic}...")
         try:
-            result = post_to_linkedin(text)
+            draft_result = draft_content(topic)
+            if draft_result.get("status") != "drafted":
+                await update.message.reply_text(f"Draft failed: {draft_result.get('detail', '?')}")
+                return
+            post_text = draft_result.get("content") or draft_result.get("post", "")
+            if not post_text:
+                await update.message.reply_text("Generated content was empty.")
+                return
+            img_path = generate_image_for_post(topic)
+            if img_path and Path(img_path).exists():
+                result = json.loads(post_multi_image(post_text, [img_path]))
+            else:
+                result = json.loads(create_post(post_text))
             if result.get("status") == "posted":
                 pid = result.get("id", "")
-                log_published("linkedin", pid, text)
-                await update.message.reply_text(f"Posted: https://linkedin.com/feed/update/{pid}")
+                log_published("linkedin", pid, post_text)
+                preview = f"**Posted — {topic}**\n\n{post_text[:2000]}"
+                if len(preview) > 4000:
+                    preview = preview[:4000]
+                await update.message.reply_text(preview)
+                await update.message.reply_text(f"https://linkedin.com/feed/update/{pid}")
             else:
                 await update.message.reply_text(f"Error: {result.get('detail', str(result))}")
         except Exception as e:
