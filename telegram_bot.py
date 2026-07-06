@@ -132,7 +132,7 @@ SCHEDULE_CONFIG_FILE = BASE / "schedule_config.json"
 PENDING_DRAFT_FILE = BASE / "pending_draft.json"
 FEEDBACK_MEMORY_FILE = BASE / "preferences.json"
 NOTIFY_CHAT_ID = None  # Set when /authorize runs
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")  # For direct HTTP notify
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()  # For direct HTTP notify
 
 # ── Pending draft queue (preview → approve flow) ────────────────────
 
@@ -324,8 +324,8 @@ def generate_image_for_post(topic: str) -> str | None:
     """Generate a social graphic and return the path, or None.
     Tries Stitch first (if configured), falls back to Pollinations.ai."""
     try:
-        stitch_key = os.getenv("STITCH_API_KEY", "")
-        stitch_project = os.getenv("STITCH_PROJECT_ID", "")
+        stitch_key = os.getenv("STITCH_API_KEY", "").strip()
+        stitch_project = os.getenv("STITCH_PROJECT_ID", "").strip()
         if stitch_key and stitch_project:
             from image_server import stitch_generate_image
             result = json.loads(stitch_generate_image(topic))
@@ -430,7 +430,7 @@ def _notify(app_instance, text: str):
 # ── Bot ─────────────────────────────────────────────────────────────
 
 def main():
-    TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     if not TOKEN:
         logger.error("TELEGRAM_BOT_TOKEN not set. Set it in .env")
         sys.exit(1)

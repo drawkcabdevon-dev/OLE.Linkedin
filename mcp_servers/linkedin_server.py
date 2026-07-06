@@ -145,7 +145,7 @@ class LinkedInClient:
         return orgs
 
 
-DEFAULT_ORG_ID = os.getenv("LINKEDIN_ORG_ID", "125564340")
+DEFAULT_ORG_ID = os.getenv("LINKEDIN_ORG_ID", "125564340").strip()
 
 
 def resolve_author(author_override: str | None = None) -> str:
@@ -166,7 +166,7 @@ _client: LinkedInClient | None = None
 def get_client() -> LinkedInClient:
     global _client
     if _client is None:
-        token = os.getenv("LINKEDIN_ACCESS_TOKEN", "")
+        token = os.getenv("LINKEDIN_ACCESS_TOKEN", "").strip()
         if not token:
             raise RuntimeError("LINKEDIN_ACCESS_TOKEN not set in .env")
         _client = LinkedInClient(token)
