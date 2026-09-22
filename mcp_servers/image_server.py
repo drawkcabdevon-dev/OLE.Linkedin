@@ -1,13 +1,12 @@
 """
 Image Generation MCP Server
-Generates social media graphics using Pollinations.ai (free, no key)
-or Google Stitch (if STITCH_API_KEY is set).
+Generates social media graphics using:
+  1. Gemini 2.5 Flash Image (highest quality, ~$0.039/image) — default
+  2. Google Stitch (if STITCH_API_KEY is set) — UI design generation
+  3. Pollinations.ai (free, no key required) — fallback
 
 Usage:
   python image_server.py
-
-Free provider: Pollinations.ai — no API key required
-Premium: Google Stitch — set STITCH_API_KEY in .env
 """
 
 import json
@@ -26,13 +25,15 @@ load_dotenv(Path.home() / ".social-agent" / ".env", override=False)
 
 server = FastMCP("images")
 
-DATA_DIR = Path(os.getenv("OLE_DATA_DIR", str(Path.home() / "Desktop" / "developer worspace " / "onlineeverywhere_-ai-marketing-suite" / "social-agent")))
+DATA_DIR = Path(os.getenv("OLE_DATA_DIR", str(Path(__file__).parent.parent)))
 ASSETS_DIR = DATA_DIR / "assets"
 ASSETS_DIR.mkdir(parents=True, exist_ok=True)
 DB_DIR = DATA_DIR
 
 STITCH_API_KEY = os.getenv("STITCH_API_KEY", "")
 STITCH_PROJECT_ID = os.getenv("STITCH_PROJECT_ID", "")
+NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "")
+NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
 
 POLLINATIONS_BASE = "https://image.pollinations.ai/prompt"
 
@@ -116,6 +117,19 @@ def _save_to_db(tool: str, campaign_id: str, prompt: str, image_path: str, post_
     conn.close()
 
 
+def _call_gemini_image(prompt: str, aspect_ratio: str = "1:1") -> bytes | None:
+    """Call Gemini 2.5 Flash Image to generate an image. Returns PNG bytes or None."""
+    try:
+        import sys
+        sys.path.insert(0, str(Path(__file__).parent.parent))
+        from gemini_client import generate_image
+        return generate_image(prompt, aspect_ratio=aspect_ratio)
+    except Exception as e:
+        import logging
+        logging.getLogger("image_server").warning(f"Gemini image error: {e}")
+        return None
+
+
 def _call_stitch_api(prompt: str) -> bytes | None:
     """Call Google Stitch API to generate a design and return its screenshot."""
     stitch_key = STITCH_API_KEY or os.getenv("STITCH_API_KEY", "")
@@ -157,6 +171,89 @@ def _call_stitch_api(prompt: str) -> bytes | None:
         import logging
         logging.getLogger("image_server").warning(f"Stitch API error: {e}")
         return None
+
+
+def _call_nvidia_image(prompt: str, width: int = 1024, height: int = 1024, model: str = "flux.1-schnell") -> bytes | None:
+    """Call NVIDIA NIM image generation API. Returns raw image bytes or None."""
+    api_key = NVIDIA_API_KEY or os.getenv("NVIDIA_API_KEY", "")
+    if not api_key:
+        return None
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    payload = {
+        "model": model,
+        "prompt": prompt,
+        "n": 1,
+        "size": f"{width}x{height}",
+        "response_format": "b64_json",
+    }
+
+    try:
+        r = httpx.post(
+            f"{NVIDIA_BASE_URL}/images/generations",
+            json=payload,
+            headers=headers,
+            timeout=120,
+        )
+        r.raise_for_status()
+        data = r.json()
+        images = data.get("data", [])
+        if not images:
+            return None
+        import base64
+        return base64.b64decode(images[0].get("b64_json", ""))
+    except Exception as e:
+        import logging
+        logging.getLogger("image_server").warning(f"NVIDIA image API error: {e}")
+        return None
+
+
+@server.tool()
+def nvidia_generate_image(prompt: str, width: int = 1024, height: int = 1024, model: str = "flux.1-schnell") -> str:
+    """Generate an image using NVIDIA NIM (high quality, OpenAI-compatible).
+
+    Requires NVIDIA_API_KEY in .env.
+
+    Args:
+        prompt: Description of the image to generate.
+        width: Image width (default 1024).
+        height: Image height (default 1024).
+        model: NVIDIA model — 'flux.1-schnell' (fast, free tier),
+               'flux.1-dev' (high quality), 'stable-diffusion-3.5-large'.
+    """
+    api_key = NVIDIA_API_KEY or os.getenv("NVIDIA_API_KEY", "")
+    if not api_key:
+        return json.dumps({"status": "error", "detail": "NVIDIA_API_KEY not set in .env"})
+
+    image_data = _call_nvidia_image(prompt, width, height, model)
+    if image_data is None:
+        return json.dumps({"status": "error", "detail": "NVIDIA API returned no image"})
+
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"nvidia_{ts}.png"
+    out_path = _save_image(image_data, filename)
+
+    result = {
+        "status": "generated",
+        "output_path": str(out_path),
+        "size_bytes": len(image_data),
+        "width": width,
+        "height": height,
+        "provider": "nvidia",
+        "model": model,
+    }
+    _save_to_db("nvidia", "custom", prompt, str(out_path), prompt)
+    # Log cost (NVIDIA free tier = $0)
+    try:
+        from cost_tracker import log_api_call
+        log_api_call("nvidia", model, 0, 0, "images/generations")
+    except Exception:
+        pass
+    return json.dumps(result, indent=2)
 
 
 @server.tool()
@@ -280,6 +377,47 @@ def generate_social_graphic(post_content: str, campaign_id: str = "", width: int
             campaign_id = "brand_identity"
 
     prompt = _social_prompt(campaign_id, post_content)
+
+    # 1. Try Gemini 2.5 Flash Image (highest quality, ~$0.039/image)
+    image_data = _call_gemini_image(prompt, aspect_ratio="1:1")
+    if image_data:
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"social_gemini_{ts}.png"
+        out_path = _save_image(image_data, filename)
+        result = {
+            "status": "generated",
+            "output_path": str(out_path),
+            "size_bytes": len(image_data),
+            "width": width,
+            "height": height,
+            "provider": "gemini-2.5-flash-image",
+            "campaign_id": campaign_id,
+        }
+        _save_to_db("gemini", campaign_id, prompt, str(out_path), post_content)
+        return json.dumps(result, indent=2)
+
+    # 2. Try Stitch (if configured)
+    stitch_key = STITCH_API_KEY or os.getenv("STITCH_API_KEY", "")
+    stitch_project = STITCH_PROJECT_ID or os.getenv("STITCH_PROJECT_ID", "")
+    if stitch_key and stitch_project:
+        image_data = _call_stitch_api(prompt)
+        if image_data:
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"social_stitch_{ts}.png"
+            out_path = _save_image(image_data, filename)
+            result = {
+                "status": "generated",
+                "output_path": str(out_path),
+                "size_bytes": len(image_data),
+                "width": width,
+                "height": height,
+                "provider": "stitch",
+                "campaign_id": campaign_id,
+            }
+            _save_to_db("stitch", campaign_id, prompt, str(out_path), post_content)
+            return json.dumps(result, indent=2)
+
+    # 3. Fallback to Pollinations (free, always works)
     return generate_image(prompt, width, height, model="flux")
 
 

@@ -1,56 +1,72 @@
 """
-Shared Gemini client — calls Vertex AI Gemini endpoint with ADC auth.
-Used by content_server, research_server, and telegram_bot.
-Avoids free-tier quota issues by using project billing.
-Works locally (gcloud ADC) and on Cloud Run (metadata server).
+Shared Gemini client using the official google-genai SDK.
+Used by content_server, research_server, telegram_bot, and image_server.
+Handles both text generation and image generation via gemini-2.5-flash-image.
 """
 
 import os
 import time
+import logging
+from pathlib import Path
 
-import httpx
+logger = logging.getLogger("gemini-client")
 
-try:
-    import google.auth
-    import google.auth.transport.requests
-    google_auth = google.auth
-except ImportError:
-    google_auth = None
+# ── Cost tracking (best-effort) ──────────────────────────────────
 
-LOCATION = "us-central1"
-PROJECT = os.getenv("GOOGLE_CLOUD_PROJECT", "linkedin-agent-501504")
-MODEL = "gemini-2.5-flash"
-VERTEX_URL = (
-    f"https://{LOCATION}-aiplatform.googleapis.com/v1/projects/{PROJECT}"
-    f"/locations/{LOCATION}/publishers/google/models/{MODEL}:generateContent"
-)
+def _log_usage(service: str, model: str, input_tokens: int, output_tokens: int, endpoint: str = ""):
+    """Log API usage to cost tracker. Non-blocking — never crashes the caller."""
+    try:
+        from cost_tracker import log_api_call
+        log_api_call(service, model, input_tokens, output_tokens, endpoint)
+    except Exception:
+        pass
 
-_token: str = ""
-_token_expiry: float = 0
+# ── SDK Client (lazy init) ───────────────────────────────────────
 
+_client = None
+_IMAGE_CLIENT = None
 
-def _get_token() -> str:
-    global _token, _token_expiry
-    if time.time() < _token_expiry:
-        return _token
-    if google_auth:
-        credentials, _ = google.auth.default(
-            scopes=["https://www.googleapis.com/auth/cloud-platform"]
+def _get_client():
+    """Get or create the google-genai client. Uses Vertex AI backend."""
+    global _client
+    if _client is not None:
+        return _client
+    try:
+        from google import genai
+        from google.genai.types import HttpOptions
+
+        _client = genai.Client(
+            vertexai=True,
+            http_options=HttpOptions(api_version="v1")
         )
-        auth_req = google.auth.transport.requests.Request()
-        credentials.refresh(auth_req)
-        _token = credentials.token
-    else:
-        import subprocess
-        result = subprocess.run(
-            ["gcloud", "auth", "print-access-token"],
-            capture_output=True, text=True, timeout=10,
-        )
-        result.check_returncode()
-        _token = result.stdout.strip()
-    _token_expiry = time.time() + 1800
-    return _token
+        logger.info("Gemini client initialized (Vertex AI backend)")
+        return _client
+    except Exception as e:
+        logger.error(f"Failed to initialize Gemini client: {e}")
+        raise
 
+
+def _get_image_client():
+    """Get or create the image generation client."""
+    global _IMAGE_CLIENT
+    if _IMAGE_CLIENT is not None:
+        return _IMAGE_CLIENT
+    try:
+        from google import genai
+        from google.genai.types import HttpOptions
+
+        _IMAGE_CLIENT = genai.Client(
+            vertexai=True,
+            http_options=HttpOptions(api_version="v1")
+        )
+        logger.info("Image generation client initialized")
+        return _IMAGE_CLIENT
+    except Exception as e:
+        logger.error(f"Failed to initialize image client: {e}")
+        raise
+
+
+# ── Text Generation ──────────────────────────────────────────────
 
 def generate_content(
     system_prompt: str,
@@ -59,43 +75,125 @@ def generate_content(
     max_tokens: int = 1024,
     max_retries: int = 3,
 ) -> str:
-    """Call Vertex AI Gemini. Returns response text. Raises on error.
-    Retries with exponential backoff on 429 (rate limit) responses."""
-    import time
+    """Call Gemini for text generation. Returns response text. Raises on error."""
+    from google.genai import types
+
+    client = _get_client()
+
     last_error = None
     for attempt in range(max_retries):
         try:
-            token = _get_token()
-            payload = {
-                "system_instruction": {"parts": [{"text": system_prompt}]},
-                "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
-                "generationConfig": {
-                    "temperature": temperature,
-                    "maxOutputTokens": max_tokens,
-                },
-            }
-            headers = {
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json",
-            }
-            r = httpx.post(VERTEX_URL, json=payload, headers=headers, timeout=30)
-            if r.status_code == 429 and attempt < max_retries - 1:
-                wait = 2 ** attempt * 5
-                print(f"Vertex AI 429 (attempt {attempt+1}/{max_retries}), retrying in {wait}s...")
-                time.sleep(wait)
-                continue
-            r.raise_for_status()
-            data = r.json()
-            candidates = data.get("candidates", [])
-            if not candidates:
-                raise RuntimeError(f"No candidates in response: {data}")
-            return candidates[0]["content"]["parts"][0]["text"]
-        except httpx.HTTPStatusError as e:
+            response = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=user_prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=system_prompt,
+                    temperature=temperature,
+                    max_output_tokens=max_tokens,
+                )
+            )
+            text = response.text or ""
+            # Log usage
+            usage = response.usage_metadata
+            if usage:
+                _log_usage("gemini", "gemini-2.5-flash",
+                           getattr(usage, 'prompt_token_count', 0),
+                           getattr(usage, 'candidates_token_count', 0),
+                           "generate_content")
+            return text
+        except Exception as e:
             last_error = e
-            if e.response.status_code == 429 and attempt < max_retries - 1:
+            if "429" in str(e) and attempt < max_retries - 1:
                 wait = 2 ** attempt * 5
-                print(f"Vertex AI 429 (attempt {attempt+1}/{max_retries}), retrying in {wait}s...")
+                logger.warning(f"Gemini 429 (attempt {attempt+1}/{max_retries}), retrying in {wait}s...")
                 time.sleep(wait)
                 continue
+            logger.warning(f"Gemini error: {e}")
             raise
-    raise last_error or RuntimeError("Max retries exceeded")
+
+    raise last_error or RuntimeError("Gemini: max retries exceeded")
+
+
+# ── Image Generation ─────────────────────────────────────────────
+
+def generate_image(
+    prompt: str,
+    aspect_ratio: str = "1:1",
+    max_retries: int = 3,
+) -> bytes | None:
+    """Generate an image using gemini-2.5-flash-image. Returns PNG bytes or None."""
+    from google.genai import types
+
+    client = _get_image_client()
+
+    last_error = None
+    for attempt in range(max_retries):
+        try:
+            response = client.models.generate_content(
+                model="gemini-2.5-flash-image",
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_modalities=["IMAGE"],
+                    image_config=types.ImageConfig(
+                        aspect_ratio=aspect_ratio,
+                    )
+                )
+            )
+            # Extract image from response
+            for part in response.candidates[0].content.parts:
+                if hasattr(part, 'inline_data') and part.inline_data:
+                    img_data = part.inline_data.data
+                    # Log usage (1290 tokens per image)
+                    _log_usage("gemini", "gemini-2.5-flash-image", 0, 1290, "generate_image")
+                    return img_data
+            logger.warning("No image in Gemini response")
+            return None
+        except Exception as e:
+            last_error = e
+            if "429" in str(e) and attempt < max_retries - 1:
+                wait = 2 ** attempt * 5
+                logger.warning(f"Gemini Image 429 (attempt {attempt+1}/{max_retries}), retrying in {wait}s...")
+                time.sleep(wait)
+                continue
+            logger.warning(f"Gemini image error: {e}")
+            return None
+
+    return None
+
+
+def generate_post_with_image(
+    post_text: str,
+    image_prompt: str,
+    aspect_ratio: str = "1:1",
+) -> tuple[str, bytes | None]:
+    """Generate a LinkedIn post AND its image in a single call.
+    Returns (post_text, image_bytes or None)."""
+    from google.genai import types
+
+    client = _get_image_client()
+
+    try:
+        response = client.models.generate_content(
+            model="gemini-2.5-flash-image",
+            contents=f"Create a LinkedIn post and a matching professional graphic.\n\nPost text:\n{post_text}\n\nImage prompt: {image_prompt}",
+            config=types.GenerateContentConfig(
+                response_modalities=["TEXT", "IMAGE"],
+                image_config=types.ImageConfig(
+                    aspect_ratio=aspect_ratio,
+                )
+            )
+        )
+
+        text = ""
+        img_data = None
+        for part in response.candidates[0].content.parts:
+            if hasattr(part, 'text') and part.text:
+                text = part.text
+            if hasattr(part, 'inline_data') and part.inline_data:
+                img_data = part.inline_data.data
+
+        _log_usage("gemini", "gemini-2.5-flash-image", 0, 1290, "generate_post_with_image")
+        return text or post_text, img_data
+    except Exception as e:
+        logger.warning(f"Gemini post+image error: {e}")
+        return post_text, None

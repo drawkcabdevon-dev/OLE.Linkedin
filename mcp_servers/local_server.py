@@ -21,7 +21,7 @@ load_dotenv(Path.home() / ".social-agent" / ".env", override=False)
 
 server = FastMCP("local-data")
 
-DB_DIR = Path(os.getenv("OLE_DATA_DIR", "/Users/devonclarke/Desktop/developer worspace /onlineeverywhere_-ai-marketing-suite/social-agent"))
+DB_DIR = Path(os.getenv("OLE_DATA_DIR", str(Path(__file__).parent.parent)))
 DB_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = DB_DIR / "data.db"
 

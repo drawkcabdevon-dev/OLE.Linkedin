@@ -82,11 +82,12 @@ def gemini_chat(user_text: str, system_prompt: str) -> str | None:
         return None
 
 def detect_intent(text: str) -> str:
-    """Simple intent matching. Skips for longer conversational messages."""
+    """Smart intent detection — matches natural language triggers AND slash-like commands.
+    Returns intent string. 'unknown' means fall through to Gemini conversational."""
+    import re
     t = text.lower().strip()
-    # Longer messages are conversational — let Gemini handle them
-    if len(t.split()) > 4:
-        return "unknown"
+
+    # ── Exact matches (short phrases) ────────────────────────────
     if t in ("hi", "hello", "hey", "sup", "yo", "what's up", "good morning", "good evening"):
         return "greeting"
     if any(w in t for w in ("what can you do", "help", "commands", "capabilities", "what do you do")):
@@ -97,18 +98,53 @@ def detect_intent(text: str) -> str:
         return "thanks"
     if any(w in t for w in ("who are you", "who is this", "what is this", "explain yourself")):
         return "whoami"
-    if any(w in t for w in ("trending", "what's hot", "whats hot", "hot topic", "trend", "what people talking about")):
-        return "trends"
-    if any(w in t for w in ("brainstorm", "ideas", "give me ideas", "think of", "come up with", "what should we post")):
-        return "brainstorm"
-    if any(w in t for w in ("what's planned", "whats planned", "upcoming", "what's coming", "calendar", "what's next", "planned posts")):
-        return "planned"
-    if any(w in t for w in ("history", "what was posted", "previous posts", "past posts", "what did we post", "recent posts")):
-        return "history"
     if any(w in t for w in ("approve", "post it", "publish it", "yes post", "go ahead", "looks good")):
         return "approve"
     if any(w in t for w in ("reject", "skip", "no", "don't post", "not that", "discard")):
         return "reject"
+
+    # ── Natural language triggers (auto-execute actions) ──────────
+    # "write about X" / "draft about X" / "create post about X"
+    draft_match = re.search(r'\b(?:write|draft|create|make|generate)\b.*\b(?:post|content|about|on)\b\s+(.+)', t)
+    if draft_match:
+        return f"draft_request:{draft_match.group(1).strip()}"
+
+    # "post about X to linkedin" / "share X on linkedin"
+    post_match = re.search(r'\b(?:post|publish|share)\b.*\b(?:to|on)\b.*\blinkedin\b.*?(?:about|on|regarding)\s+(.+)', t)
+    if not post_match:
+        post_match = re.search(r'\b(?:post|publish|share)\b\s+(.+)', t)
+    if post_match:
+        return f"post_request:{post_match.group(1).strip()}"
+
+    # "what's trending" / "trending topics" / "what's hot"
+    if any(w in t for w in ("trending", "what's hot", "whats hot", "hot topic", "trend", "what people talking about", "what's trending")):
+        return "trends_request"
+
+    # "research X" / "deep dive on X" / "analyze X"
+    research_match = re.search(r'\b(?:research|deep dive|analyze|investigate)\b\s+(.+)', t)
+    if research_match:
+        return f"research_request:{research_match.group(1).strip()}"
+
+    # "brainstorm X" / "give me ideas about X" / "what should we post about X"
+    brainstorm_match = re.search(r'\b(?:brainstorm|ideas|give me ideas|suggest|what should(?:\s+we)?\s*post)\b.*?(?:about|on|regarding)?\s*(.+)', t)
+    if brainstorm_match:
+        topic = brainstorm_match.group(1).strip()
+        return f"brainstorm_request:{topic}" if topic else "brainstorm_request"
+
+    # "what's scheduled" / "what's coming up" / "calendar"
+    if any(w in t for w in ("scheduled", "coming up", "upcoming", "calendar", "what's planned", "planned posts")):
+        return "schedule_request"
+
+    # "history" / "what was posted" / "recent posts"
+    if any(w in t for w in ("history", "what was posted", "previous posts", "past posts", "recent posts")):
+        return "history_request"
+
+    # "make it shorter" / "more professional" / "edit with feedback"
+    edit_match = re.search(r'\b(?:make it|change|edit|revise|shorter|longer|more|less|different)\b\s*(.*)', t)
+    if edit_match:
+        return f"edit_request:{edit_match.group(1).strip()}" if edit_match.group(1).strip() else "edit_request"
+
+    # ── Fallback: let Gemini handle it ───────────────────────────
     return "unknown"
 
 INTENT_RESPONSES = {
@@ -238,13 +274,15 @@ def days_to_cron(days_str: str) -> str:
 
 BASE_DIR = str(Path(__file__).parent.resolve())
 SERVER_DIR = BASE_DIR + "/mcp_servers"
+ASSETS_DIR = Path(BASE_DIR) / "assets"
+ASSETS_DIR.mkdir(parents=True, exist_ok=True)
 for d in (SERVER_DIR, BASE_DIR):
     if d not in sys.path:
         sys.path.insert(0, d)
 
 from linkedin_server import create_post, post_image, post_multi_image
 from content_server import draft_post, add_premium_example, list_premium_examples, delete_premium_example
-from image_server import generate_social_graphic, generate_carousel_images
+from image_server import generate_social_graphic, generate_carousel_images, CAMPAIGN_VISUALS
 from research_server import trending_searches, daily_brief
 from local_server import save_draft, log_published, list_published
 from gemini_client import generate_content as _gemini_vertex
@@ -343,25 +381,75 @@ def generate_daily_ideas(count: int = 3) -> list[dict]:
 
 def generate_image_for_post(topic: str) -> str | None:
     """Generate a social graphic and return the path, or None.
-    Tries Stitch first (if configured), falls back to Pollinations.ai."""
+    Tries: Gemini 2.5 Flash Image → Stitch → Pollinations.ai.
+    Logs failures instead of silently returning None."""
+    # 1. Try Gemini 2.5 Flash Image (highest quality, ~$0.039/image)
     try:
-        stitch_key = os.getenv("STITCH_API_KEY", "").strip()
-        stitch_project = os.getenv("STITCH_PROJECT_ID", "").strip()
-        if stitch_key and stitch_project:
+        from gemini_client import generate_image
+        import base64
+        from datetime import datetime
+
+        visual = CAMPAIGN_VISUALS.get("brand_identity", CAMPAIGN_VISUALS["brand_identity"])
+        prompt = (
+            f"Professional LinkedIn social media post graphic. "
+            f"{visual['style']} style. "
+            f"Subject: {visual['subject']}. "
+            f"Mood: {visual['mood']}. "
+            f"Color palette: dark navy blue background, bright blue (#4285F4), green (#34A853), red (#EA4335) accents. "
+            f"Modern, clean, high-end marketing agency aesthetic. "
+            f"Text overlay area on left/center with space for headline. "
+            f"Do NOT make it look like a website UI or app interface. "
+            f"8k resolution, highly detailed, professional lighting."
+        )
+        img_data = generate_image(prompt, aspect_ratio="1:1")
+        if img_data:
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"gemini_{ts}.png"
+            out_path = ASSETS_DIR / filename
+            out_path.write_bytes(img_data)
+            logger.info(f"Image generated via Gemini 2.5 Flash Image: {out_path}")
+            return str(out_path)
+        logger.warning("Gemini image gen returned no data")
+    except Exception as e:
+        logger.warning(f"Gemini image gen error: {e}")
+
+    # 2. Try Stitch (if configured)
+    stitch_key = os.getenv("STITCH_API_KEY", "").strip()
+    stitch_project = os.getenv("STITCH_PROJECT_ID", "").strip()
+    if stitch_key and stitch_project:
+        try:
             from image_server import stitch_generate_image
             result = json.loads(stitch_generate_image(topic))
             path = result.get("output_path")
             if path:
+                logger.info(f"Image generated via Stitch: {path}")
                 return path
+            logger.warning(f"Stitch image gen failed: {result.get('detail', 'unknown')}")
+        except Exception as e:
+            logger.warning(f"Stitch image gen error: {e}")
+
+    # 3. Fallback to Pollinations (free, no key, always works)
+    try:
         result = json.loads(generate_social_graphic(topic, "modern"))
-        return result.get("output_path")
-    except Exception:
-        return None
+        path = result.get("output_path")
+        if path:
+            logger.info(f"Image generated via Pollinations: {path}")
+            return path
+        logger.warning(f"Pollinations image gen failed: {result.get('detail', 'unknown')}")
+    except Exception as e:
+        logger.warning(f"Pollinations image gen error: {e}")
+
+    logger.error(f"All image providers failed for topic: {topic}")
+    return None
 
 # ── Auto-content pipeline ──────────────────────────────────────────
 
+_pipeline_failures = 0  # consecutive failure counter
+_MAX_FAILURES_BEFORE_ALERT = 3
+
 def run_content_pipeline(app_instance=None):
     """Generate content and post or save as draft. Called by APScheduler."""
+    global _pipeline_failures
     cfg = load_schedule()
     if not cfg.get("enabled"):
         return
@@ -402,6 +490,9 @@ def run_content_pipeline(app_instance=None):
 
     # 4. Generate an image
     img_path = generate_image_for_post(topic)
+    if not img_path:
+        logger.warning(f"Pipeline: no image generated for '{topic}' — posting text-only")
+        _notify(app_instance, f"Warning: Image generation failed for '{topic}'. Posting text-only.")
 
     # 5. Post or save as draft
     mode = cfg.get("mode", "draft")
@@ -434,6 +525,18 @@ def run_content_pipeline(app_instance=None):
             logger.info(f"Pipeline: draft saved for topic '{topic}', awaiting approval")
         except Exception as e:
             logger.error(f"Pipeline: notify draft failed: {e}")
+
+    # Track success/failure for alerting
+    if draft_result.get("status") == "drafted":
+        _pipeline_failures = 0  # reset on success
+    else:
+        _pipeline_failures += 1
+        if _pipeline_failures >= _MAX_FAILURES_BEFORE_ALERT:
+            _notify(app_instance,
+                f"Alert: {_pipeline_failures} consecutive pipeline failures.\n"
+                f"Last error: {draft_result.get('detail', 'draft failed')}\n"
+                "Check logs and /status for details.")
+            logger.error(f"Pipeline: {_pipeline_failures} consecutive failures")
 
 def _notify(app_instance, text: str):
     """Send a notification via Telegram HTTP API (no async needed)."""
@@ -606,6 +709,7 @@ def main():
             "/events             - Upcoming calendar events\n"
             "📸 Send a photo     - Save it as a premium style reference\n"
             "/status             - Health check\n"
+            "/costs              - API usage & cost summary\n"
             "/help               - This message"
         )
         await update.message.reply_text(text)
@@ -1336,6 +1440,38 @@ def main():
         except Exception as e:
             await update.message.reply_text(f"Error: {e}")
 
+    async def costs_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show API usage and cost summary."""
+        if not await require_auth(update, context): return
+        try:
+            from cost_tracker import get_total_spend, get_spend_by_service, get_daily_summary
+
+            total = get_total_spend()
+            by_service = get_spend_by_service()
+            daily = get_daily_summary(7)
+
+            text = "**API Usage & Costs**\n\n"
+            text += f"Total calls: {total['total_calls']}\n"
+            text += f"Total tokens: {total['total_input_tokens']:,} in / {total['total_output_tokens']:,} out\n"
+            text += f"Estimated cost: ${total['total_cost_usd']:.4f}\n\n"
+
+            if by_service:
+                text += "**By Service:**\n"
+                for s in by_service:
+                    text += f"  {s['service']}: {s['calls']} calls, ${s['total_cost']:.4f}\n"
+                text += "\n"
+
+            if daily:
+                text += "**Last 7 days:**\n"
+                for d in daily[:10]:
+                    text += f"  {d['day']} | {d['service']}: {d['calls']} calls, ${d['total_cost']:.4f}\n"
+            else:
+                text += "_No usage data yet (tracking starts now)_\n"
+
+            await update.message.reply_text(text)
+        except Exception as e:
+            await update.message.reply_text(f"Cost tracking error: {e}")
+
     async def post_now(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not await require_auth(update, context): return
         await update.message.reply_text("Running content pipeline now...")
@@ -1448,7 +1584,8 @@ def main():
         await update.message.reply_text(msg)
 
     async def chat_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Conversational handler for non-command messages."""
+        """Conversational handler for non-command messages.
+        Detects natural language triggers and auto-executes actions."""
         if not update.message or not update.message.text:
             return
         if not await require_auth(update, context):
@@ -1456,14 +1593,178 @@ def main():
         user_text = update.message.text.strip()
         await update.message.reply_chat_action("typing")
 
-        # 1. Try intent-based response (no Gemini call)
+        # 1. Detect intent (includes natural language triggers)
         intent = detect_intent(user_text)
+
+        # 2. Handle ACTION intents — execute the action directly
+        if intent.startswith("draft_request:"):
+            topic = intent.split(":", 1)[1]
+            await update.message.reply_text(f"Drafting a post about: *{topic}*", parse_mode="Markdown")
+            try:
+                result = draft_content(topic)
+                if result.get("status") == "drafted":
+                    post_text = result.get("content", "")
+                    await update.message.reply_text(f"**Draft ready:**\n\n{post_text[:2000]}\n\n---\nSend /approve to publish, /edit to revise, or /reject to skip.", parse_mode="Markdown")
+                    # Generate image
+                    img_path = generate_image_for_post(topic)
+                    if img_path:
+                        await update.message.reply_photo(photo=open(img_path, "rb"))
+                else:
+                    await update.message.reply_text(f"Draft failed: {result.get('detail', 'unknown error')}")
+            except Exception as e:
+                await update.message.reply_text(f"Error drafting: {e}")
+            return
+
+        if intent.startswith("post_request:"):
+            topic = intent.split(":", 1)[1]
+            await update.message.reply_text(f"Creating and posting to LinkedIn: *{topic}*", parse_mode="Markdown")
+            try:
+                result = draft_content(topic)
+                if result.get("status") == "drafted":
+                    post_text = result.get("content", "")
+                    img_path = generate_image_for_post(topic)
+                    if img_path:
+                        post_result = json.loads(post_multi_image(post_text, [img_path]))
+                    else:
+                        post_result = json.loads(create_post(post_text))
+                    if post_result.get("status") == "posted":
+                        log_published("linkedin", post_result.get("id", ""), post_text)
+                        await update.message.reply_text(f"Posted to LinkedIn!\nID: {post_result.get('id', '')}")
+                    else:
+                        await update.message.reply_text(f"Post failed: {post_result.get('detail', '')}")
+                else:
+                    await update.message.reply_text(f"Draft failed: {result.get('detail', '')}")
+            except Exception as e:
+                await update.message.reply_text(f"Error posting: {e}")
+            return
+
+        if intent == "trends_request":
+            await update.message.reply_text("Checking trending topics...")
+            try:
+                from research_server import daily_brief
+                brief = json.loads(daily_brief())
+                us = brief.get("us_trends", [])[:5]
+                bb = brief.get("barbados_trends", [])[:5]
+                msg = "**Today's Trends**\n\n"
+                msg += "US:\n" + "\n".join(f"- {t}" for t in us) + "\n\n"
+                msg += f"Barbados: {', '.join(bb)}\n\n"
+                msg += "Want me to draft a post about any of these? Just say it."
+                await update.message.reply_text(msg, parse_mode="Markdown")
+            except Exception as e:
+                await update.message.reply_text(f"Trends error: {e}")
+            return
+
+        if intent.startswith("research_request:"):
+            topic = intent.split(":", 1)[1]
+            await update.message.reply_text(f"Researching: *{topic}*", parse_mode="Markdown")
+            try:
+                from research_server import analyze_topic
+                result = json.loads(analyze_topic(topic))
+                await update.message.reply_text(result.get("analysis", result.get("detail", "No results"))[:3000])
+            except Exception as e:
+                await update.message.reply_text(f"Research error: {e}")
+            return
+
+        if intent.startswith("brainstorm_request:"):
+            topic = intent.split(":", 1)[1] if ":" in intent else ""
+            await update.message.reply_text(f"Brainstorming ideas{' about ' + topic if topic else ''}...")
+            try:
+                from content_server import generate_batch_ideas
+                ideas = json.loads(generate_batch_ideas(topic or "social media marketing"))
+                if isinstance(ideas, list):
+                    msg = "**Brainstorm:**\n\n"
+                    for i, idea in enumerate(ideas[:8], 1):
+                        title = idea.get("title", f"Idea {i}")
+                        body = idea.get("body", "")
+                        msg += f"*{i}. {title}*\n{body[:200]}\n\n"
+                    await update.message.reply_text(msg, parse_mode="Markdown")
+                else:
+                    await update.message.reply_text(str(ideas)[:2000])
+            except Exception as e:
+                await update.message.reply_text(f"Brainstorm error: {e}")
+            return
+
+        if intent == "schedule_request":
+            cfg = load_schedule()
+            status = "enabled" if cfg.get("enabled") else "disabled"
+            await update.message.reply_text(
+                f"Schedule: *{status}*\n"
+                f"Time: {cfg.get('time')} UTC\n"
+                f"Days: {cfg.get('days')}\n"
+                f"Mode: {cfg.get('mode')}\n"
+                f"Topics: {', '.join(cfg.get('topics', [])[:3])}...",
+                parse_mode="Markdown"
+            )
+            return
+
+        if intent == "history_request":
+            try:
+                hist = json.loads(list_published(platform="linkedin", limit=5))
+                if isinstance(hist, list) and hist:
+                    msg = "**Recent Posts:**\n\n"
+                    for h in hist:
+                        date = (h.get("created_at") or "")[:10]
+                        content = (h.get("content") or "")[:150].replace("\n", " ")
+                        msg += f"- {date}: {content}\n"
+                    await update.message.reply_text(msg, parse_mode="Markdown")
+                else:
+                    await update.message.reply_text("No posts yet.")
+            except Exception as e:
+                await update.message.reply_text(f"History error: {e}")
+            return
+
+        if intent == "approve_request":
+            try:
+                pending = load_pending_draft()
+                if pending:
+                    post_text = pending.get("content", "")
+                    img_path = pending.get("image_path")
+                    if img_path:
+                        result = json.loads(post_multi_image(post_text, [img_path]))
+                    else:
+                        result = json.loads(create_post(post_text))
+                    if result.get("status") == "posted":
+                        log_published("linkedin", result.get("id", ""), post_text)
+                        clear_pending_draft()
+                        await update.message.reply_text(f"Published! ID: {result.get('id', '')}")
+                    else:
+                        await update.message.reply_text(f"Post failed: {result.get('detail', '')}")
+                else:
+                    await update.message.reply_text("Nothing pending. Use /preview to see the next draft.")
+            except Exception as e:
+                await update.message.reply_text(f"Approve error: {e}")
+            return
+
+        if intent == "reject_request":
+            clear_pending_draft()
+            await update.message.reply_text("Skipped. Next topic will be picked up on the next cycle.")
+            return
+
+        if intent.startswith("edit_request:"):
+            feedback = intent.split(":", 1)[1]
+            await update.message.reply_text(f"Editing draft with feedback: *{feedback}*", parse_mode="Markdown")
+            try:
+                pending = load_pending_draft()
+                if pending:
+                    result = draft_content(f"{pending.get('topic', '')} — revise based on: {feedback}")
+                    if result.get("status") == "drafted":
+                        post_text = result.get("content", "")
+                        await update.message.reply_text(f"**Revised draft:**\n\n{post_text[:2000]}\n\n---\nSend /approve to publish.", parse_mode="Markdown")
+                    else:
+                        await update.message.reply_text(f"Edit failed: {result.get('detail', '')}")
+                else:
+                    await update.message.reply_text("Nothing to edit. Use /draft to create a post first.")
+            except Exception as e:
+                await update.message.reply_text(f"Edit error: {e}")
+            return
+
+        # 3. Handle simple intent responses (greeting, help, etc.)
         if intent != "unknown":
             reply = INTENT_RESPONSES.get(intent, FALLBACK_REPLY)
             await update.message.reply_text(reply)
             return
 
-        # 2. Try Gemini with rate limiting
+        # 4. Fall through to Gemini conversational
         try:
             from content_server import OLE_SYSTEM_PROMPT
 
@@ -1504,12 +1805,12 @@ def main():
 
 You are the LinkedIn coordinator for Online Everywhere. You chat with the business owner. Be conversational, direct, and helpful.
 Maintain context from the conversation history above — if the user follows up on a previous topic, acknowledge it.
-When the user asks you to do something actionable (research a company, draft about a topic, check trends, etc.), respond enthusiastically, show you understand what they want, and provide a single ready-to-use slash command with their topic already filled in — for example:
-  - Research: "Great idea! Run /research GovTech in Barbados digital transformation and I'll pull together a full research brief for you."
-  - Draft: "Let's make this happen. Use /draft GovTech digital transformation in Barbados to generate a post."
-  - Trends: "Use /trends to see what's trending right now in Barbados."
-  - Check/post: "Use /post GovTech and digital transformation in Barbados to publish immediately."
-Do NOT just say "use the right slash command" — connect it to what they said and fill in their topic."""
+When the user asks you to do something actionable, respond with enthusiasm and DO IT for them — don't just suggest a slash command.
+For example:
+- "write about AI" → Execute the draft immediately
+- "what's trending" → Show them the trends
+- "post about X" → Draft and post it
+- "research Y" → Run the research and show results"""
 
             reply = gemini_chat(user_text, system_prompt)
             if reply:
@@ -1522,7 +1823,7 @@ Do NOT just say "use the right slash command" — connect it to what they said a
             logger.warning(f"Gemini chat failed: {e}")
             pass
 
-        # 3. Fallback when Gemini is rate limited or unavailable
+        # 5. Fallback when Gemini is rate limited or unavailable
         await update.message.reply_text(FALLBACK_REPLY)
 
     # ── Register handlers ───────────────────────────────────────
@@ -1552,6 +1853,7 @@ Do NOT just say "use the right slash command" — connect it to what they said a
     app.add_handler(CommandHandler("mirror", mirror_cmd))
     app.add_handler(CommandHandler("post_now", post_now))
     app.add_handler(CommandHandler("status", status_cmd))
+    app.add_handler(CommandHandler("costs", costs_cmd))
     app.add_handler(CommandHandler("examples", examples_cmd))
     app.add_handler(CommandHandler("events", events_cmd))
 

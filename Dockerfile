@@ -18,6 +18,7 @@ COPY mcp_servers/ mcp_servers/
 COPY templates/ templates/
 COPY telegram_bot.py .
 COPY gemini_client.py .
+COPY cost_tracker.py .
 COPY schedule_config.json data/
 COPY authorized_chats.json data/
 COPY entrypoint.sh .

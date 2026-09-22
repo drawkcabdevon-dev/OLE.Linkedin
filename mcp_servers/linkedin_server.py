@@ -27,7 +27,7 @@ load_dotenv(Path.home() / "social-agent" / ".env")
 # Also check ~/.social-agent/.env
 load_dotenv(Path.home() / ".social-agent" / ".env", override=False)
 
-DATA_DIR = Path(os.getenv("OLE_DATA_DIR", str(Path.home() / "Desktop" / "developer worspace " / "onlineeverywhere_-ai-marketing-suite" / "social-agent")))
+DATA_DIR = Path(os.getenv("OLE_DATA_DIR", str(Path(__file__).parent.parent)))
 ASSETS_DIR = DATA_DIR / "assets"
 ASSETS_DIR.mkdir(parents=True, exist_ok=True)
 

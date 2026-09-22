@@ -13,7 +13,7 @@ steps:
       - '--region=us-central1'
       - '--platform=managed'
       - '--allow-unauthenticated'
-      - '--memory=1Gi'
+      - '--memory=512Mi'
       - '--min-instances=1'
       - '--max-instances=1'
       - '--concurrency=1'
