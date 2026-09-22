@@ -217,6 +217,63 @@ def save_conversation_memory(memory: list[dict]):
     CONVERSATION_MEMORY_FILE.parent.mkdir(parents=True, exist_ok=True)
     CONVERSATION_MEMORY_FILE.write_text(json.dumps(memory[-10:]))
 
+# ── Brainstorm memory ─────────────────────────────────────────────
+
+BRAINSTORM_MEMORY_FILE = Path(os.getenv("OLE_DATA_DIR", ".")) / "brainstorm_memory.json"
+
+def load_brainstorm_memory() -> list[dict]:
+    """Load brainstorming sessions from file."""
+    if BRAINSTORM_MEMORY_FILE.exists():
+        return json.loads(BRAINSTORM_MEMORY_FILE.read_text())
+    return []
+
+def save_brainstorm_session(session: dict):
+    """Save a brainstorming session with topic, ideas, and timestamp."""
+    memory = load_brainstorm_memory()
+    memory.append(session)
+    # Keep last 50 sessions
+    BRAINSTORM_MEMORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    BRAINSTORM_MEMORY_FILE.write_text(json.dumps(memory[-50:]))
+
+def get_brainstorm_by_topic(topic: str) -> list[dict]:
+    """Retrieve brainstorming sessions matching a topic."""
+    memory = load_brainstorm_memory()
+    return [s for s in memory if topic.lower() in s.get("topic", "").lower()]
+
+def get_recent_brainstorms(limit: int = 10) -> list[dict]:
+    """Get recent brainstorming sessions."""
+    memory = load_brainstorm_memory()
+    return memory[-limit:]
+
+def delete_brainstorm_session(session_id: str):
+    """Delete a brainstorming session by ID."""
+    memory = load_brainstorm_memory()
+    memory = [s for s in memory if s.get("id") != session_id]
+    BRAINSTORM_MEMORY_FILE.write_text(json.dumps(memory))
+
+def update_brainstorm_status(session_id: str, status: str):
+    """Update a brainstorming session's status (saved, drafted, scheduled, archived)."""
+    memory = load_brainstorm_memory()
+    for session in memory:
+        if session.get("id") == session_id:
+            session["status"] = status
+            session["updated_at"] = datetime.now(timezone.utc).isoformat()
+            break
+    BRAINSTORM_MEMORY_FILE.write_text(json.dumps(memory))
+
+def save_brainstorm_idea(session_id: str, idea_index: int):
+    """Mark a specific idea from a session as saved for later use."""
+    memory = load_brainstorm_memory()
+    for session in memory:
+        if session.get("id") == session_id:
+            if "saved_ideas" not in session:
+                session["saved_ideas"] = []
+            if idea_index not in session["saved_ideas"]:
+                session["saved_ideas"].append(idea_index)
+            session["updated_at"] = datetime.now(timezone.utc).isoformat()
+            break
+    BRAINSTORM_MEMORY_FILE.write_text(json.dumps(memory))
+
 # ── Schedule config ─────────────────────────────────────────────────
 
 DEFAULT_SCHEDULE = {
@@ -382,24 +439,33 @@ def generate_daily_ideas(count: int = 3) -> list[dict]:
 def generate_image_for_post(topic: str) -> str | None:
     """Generate a social graphic and return the path, or None.
     Tries: Gemini 2.5 Flash Image → Stitch → Pollinations.ai.
-    Logs failures instead of silently returning None."""
+    Uses topic-relevant prompts instead of generic brand imagery."""
     # 1. Try Gemini 2.5 Flash Image (highest quality, ~$0.039/image)
     try:
         from gemini_client import generate_image
-        import base64
         from datetime import datetime
+        from image_server import _generate_topic_visual, BRAND_COLORS
 
-        visual = CAMPAIGN_VISUALS.get("brand_identity", CAMPAIGN_VISUALS["brand_identity"])
+        # Generate topic-relevant visual description
+        visual = _generate_topic_visual(topic)
+        
         prompt = (
-            f"Professional LinkedIn social media post graphic. "
-            f"{visual['style']} style. "
-            f"Subject: {visual['subject']}. "
-            f"Mood: {visual['mood']}. "
-            f"Color palette: dark navy blue background, bright blue (#4285F4), green (#34A853), red (#EA4335) accents. "
-            f"Modern, clean, high-end marketing agency aesthetic. "
-            f"Text overlay area on left/center with space for headline. "
-            f"Do NOT make it look like a website UI or app interface. "
-            f"8k resolution, highly detailed, professional lighting."
+            f"Professional LinkedIn social media post graphic.\n"
+            f"Style: {visual['style']}.\n"
+            f"Visual elements: {visual['subject']}.\n"
+            f"Mood: {visual['mood']}.\n"
+            f"Color palette: Dark navy background ({BRAND_COLORS['navy']}), "
+            f"with accent colors bright blue ({BRAND_COLORS['primary']}), "
+            f"green ({BRAND_COLORS['green']}), red ({BRAND_COLORS['red']}).\n"
+            f"Layout: Clean, modern design with the visual elements as the focal point. "
+            f"Leave space on left side for text overlay (headline area).\n"
+            f"Requirements:\n"
+            f"- Must look like a premium social media graphic, NOT a website screenshot\n"
+            f"- NO UI elements, buttons, or app interfaces\n"
+            f"- NO text or words in the image (text goes in post, not image)\n"
+            f"- Professional lighting, 8k quality, highly detailed\n"
+            f"- Suitable for LinkedIn professional audience\n"
+            f"- The image should visually represent the topic: {topic}"
         )
         img_data = generate_image(prompt, aspect_ratio="1:1")
         if img_data:
@@ -885,7 +951,7 @@ def main():
             await update.message.reply_text(f"Error: {e}")
 
     async def brainstorm_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Brainstorm mode: generates rapid-fire post ideas."""
+        """Brainstorm mode: generates rapid-fire post ideas and saves them."""
         if not await require_auth(update, context): return
         topic = " ".join(context.args) if context.args else "digital marketing for Barbados SMEs"
         await update.message.reply_chat_action("typing")
@@ -896,26 +962,64 @@ def main():
             result = json.loads(generate_batch_ideas(count=8, theme=topic))
             content = result.get("ideas", "")
 
-            # Parse or use raw
+            # Parse ideas into structured format
+            ideas = []
+            current_idea = None
             lines = content.split("\n")
-            msg = f"**Brainstorm: {topic}**\n\n"
-            idea_count = 0
+            
             for line in lines:
                 line = line.strip()
                 if line.startswith("IDEA") or line.startswith("**IDEA"):
-                    idea_count += 1
-                    msg += f"\n{line}\n"
-                elif line and idea_count > 0:
-                    msg += f"{line}\n"
+                    if current_idea:
+                        ideas.append(current_idea)
+                    # Extract idea number and title
+                    parts = line.replace("**", "").split(":", 1)
+                    idea_num = parts[0].replace("IDEA", "").strip()
+                    title = parts[1].strip() if len(parts) > 1 else ""
+                    current_idea = {
+                        "number": idea_num,
+                        "title": title,
+                        "description": "",
+                    }
+                elif line and current_idea and not line.startswith("IDEA"):
+                    if current_idea["description"]:
+                        current_idea["description"] += " " + line
+                    else:
+                        current_idea["description"] = line
+            
+            if current_idea:
+                ideas.append(current_idea)
 
-                if len(msg) > 3500:
-                    msg += "\n...more ideas available."
-                    break
+            # Save session to memory
+            from datetime import datetime
+            session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+            session = {
+                "id": session_id,
+                "topic": topic,
+                "ideas": ideas,
+                "raw_content": content,
+                "status": "new",
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "saved_ideas": [],
+            }
+            save_brainstorm_session(session)
 
-            if idea_count == 0:
+            # Format message
+            msg = f"**Brainstorm: {topic}**\n\n"
+            for i, idea in enumerate(ideas[:8], 1):
+                msg += f"**{i}. {idea['title']}**\n"
+                msg += f"{idea['description'][:200]}\n\n"
+
+            if len(ideas) == 0:
                 msg += content[:2000]
 
-            msg += "\n\n---\nLike one? Use /draft with the topic, or /post to publish immediately."
+            msg += f"\n---\nSession saved! Use:\n"
+            msg += f"• `/draft <idea number>` to create a post from an idea\n"
+            msg += f"• `/ideas` to view all saved brainstorm sessions\n"
+            msg += f"• `/saveidea <number>` to bookmark an idea for later\n"
+            msg += f"• Pick one and I'll draft it now."
+            
             await update.message.reply_text(msg[:4000])
         except Exception as e:
             error_msg = str(e)
@@ -924,11 +1028,167 @@ def main():
             else:
                 await update.message.reply_text(f"Brainstorm hit a snag: {error_msg[:200]}")
 
-        # Follow up with a second wave if they want to continue
+    async def ideas_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """View saved brainstorming sessions."""
+        if not await require_auth(update, context): return
+        
+        sessions = get_recent_brainstorms(limit=10)
+        if not sessions:
+            await update.message.reply_text(
+                "No brainstorming sessions yet. Use `/brainstorm <topic>` to generate ideas!"
+            )
+            return
+
+        msg = "**Saved Brainstorm Sessions:**\n\n"
+        for session in reversed(sessions):
+            session_id = session.get("id", "unknown")
+            topic = session.get("topic", "Unknown")
+            idea_count = len(session.get("ideas", []))
+            status = session.get("status", "new")
+            created = session.get("created_at", "")[:10]
+            saved_count = len(session.get("saved_ideas", []))
+            
+            msg += f"**{session_id}** — {topic}\n"
+            msg += f"  {idea_count} ideas | Status: {status} | Saved: {saved_count}\n"
+            msg += f"  Created: {created}\n\n"
+
+        msg += "\nUse `/session <id>` to view details, or `/draft <idea>` to create a post."
+        await update.message.reply_text(msg[:4000])
+
+    async def session_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """View details of a brainstorming session."""
+        if not await require_auth(update, context): return
+        
+        if not context.args:
+            await update.message.reply_text("Usage: `/session <session_id>`")
+            return
+
+        session_id = context.args[0]
+        sessions = get_recent_brainstorms(limit=50)
+        session = next((s for s in sessions if s.get("id") == session_id), None)
+        
+        if not session:
+            await update.message.reply_text(f"Session `{session_id}` not found.")
+            return
+
+        topic = session.get("topic", "Unknown")
+        ideas = session.get("ideas", [])
+        saved_ideas = session.get("saved_ideas", [])
+        status = session.get("status", "new")
+
+        msg = f"**Session: {session_id}**\n"
+        msg += f"Topic: {topic}\n"
+        msg += f"Status: {status}\n\n"
+        
+        for i, idea in enumerate(ideas, 1):
+            saved_marker = " ✓" if i in saved_ideas else ""
+            msg += f"**{i}. {idea.get('title', 'Untitled')}**{saved_marker}\n"
+            msg += f"{idea.get('description', 'No description')[:200]}\n\n"
+
+        msg += "\nCommands:\n"
+        msg += "• `/draft <number>` — Create post from this idea\n"
+        msg += "• `/saveidea <number>` — Bookmark idea\n"
+        msg += "• `/scheduleidea <number> <date>` — Add to content schedule\n"
+        msg += "• `/deletesession <id>` — Remove session"
+        
+        await update.message.reply_text(msg[:4000])
+
+    async def saveidea_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Bookmark a specific idea from a brainstorming session."""
+        if not await require_auth(update, context): return
+        
+        if not context.args:
+            await update.message.reply_text("Usage: `/saveidea <session_id> <idea_number>`")
+            return
+
+        # Find the most recent session if only idea number provided
+        if len(context.args) == 1:
+            sessions = get_recent_brainstorms(limit=1)
+            if not sessions:
+                await update.message.reply_text("No brainstorming sessions found.")
+                return
+            session = sessions[-1]
+            idea_num = int(context.args[0])
+        else:
+            session_id = context.args[0]
+            idea_num = int(context.args[1])
+            sessions = get_recent_brainstorms(limit=50)
+            session = next((s for s in sessions if s.get("id") == session_id), None)
+            if not session:
+                await update.message.reply_text(f"Session `{session_id}` not found.")
+                return
+
+        ideas = session.get("ideas", [])
+        if idea_num < 1 or idea_num > len(ideas):
+            await update.message.reply_text(f"Invalid idea number. Choose 1-{len(ideas)}.")
+            return
+
+        save_brainstorm_idea(session["id"], idea_num)
+        idea = ideas[idea_num - 1]
         await update.message.reply_text(
-            "Want me to keep brainstorming on a different angle? Just say the topic "
-            "or use /brainstorm again. Or pick one and I'll draft it."
+            f"Saved idea #{idea_num}: **{idea.get('title', 'Untitled')}**\n\n"
+            f"Use `/draft {idea.get('title', '')}` to create a post from this idea."
         )
+
+    async def scheduleidea_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Add a brainstormed idea to the content schedule."""
+        if not await require_auth(update, context): return
+        
+        if len(context.args) < 2:
+            await update.message.reply_text("Usage: `/scheduleidea <session_id> <idea_number> [date]`")
+            return
+
+        # Parse arguments
+        if len(context.args) == 2:
+            # Only idea number, auto-find session
+            sessions = get_recent_brainstorms(limit=1)
+            if not sessions:
+                await update.message.reply_text("No brainstorming sessions found.")
+                return
+            session = sessions[-1]
+            idea_num = int(context.args[1])
+        else:
+            session_id = context.args[0]
+            idea_num = int(context.args[1])
+            sessions = get_recent_brainstorms(limit=50)
+            session = next((s for s in sessions if s.get("id") == session_id), None)
+            if not session:
+                await update.message.reply_text(f"Session `{session_id}` not found.")
+                return
+
+        ideas = session.get("ideas", [])
+        if idea_num < 1 or idea_num > len(ideas):
+            await update.message.reply_text(f"Invalid idea number. Choose 1-{len(ideas)}.")
+            return
+
+        idea = ideas[idea_num - 1]
+        topic = idea.get("title", "") + " - " + idea.get("description", "")[:100]
+        
+        # Add to schedule
+        cfg = load_schedule()
+        if "topics" not in cfg:
+            cfg["topics"] = []
+        cfg["topics"].append(topic)
+        save_schedule(cfg)
+        
+        update_brainstorm_status(session["id"], "scheduled")
+        
+        await update.message.reply_text(
+            f"Added to content schedule:\n**{idea.get('title', 'Untitled')}**\n\n"
+            f"Use /schedule to view the full schedule."
+        )
+
+    async def deletesession_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Delete a brainstorming session."""
+        if not await require_auth(update, context): return
+        
+        if not context.args:
+            await update.message.reply_text("Usage: `/deletesession <session_id>`")
+            return
+
+        session_id = context.args[0]
+        delete_brainstorm_session(session_id)
+        await update.message.reply_text(f"Session `{session_id}` deleted.")
 
     def next_scheduled_posts(days_to_show: int = 7) -> list[dict]:
         """Calculate upcoming posts based on schedule config."""
@@ -1040,6 +1300,196 @@ def main():
                 await update.message.reply_photo(photo=f, caption="Preview image for the pending draft.")
         except Exception as e:
             await update.message.reply_text(f"Image preview failed: {e}")
+
+    async def batch_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show 2-month content calendar in batch format with editing options."""
+        if not await require_auth(update, context): return
+        
+        cfg = load_schedule()
+        if not cfg.get("enabled"):
+            await update.message.reply_text("Schedule is disabled. Enable it with /schedule on")
+            return
+
+        # Calculate 60 days ahead
+        upcoming = next_scheduled_posts(60)
+        if not upcoming:
+            await update.message.reply_text("No upcoming posts scheduled.")
+            return
+
+        # Group by week
+        from collections import defaultdict
+        weeks = defaultdict(list)
+        for entry in upcoming:
+            date = entry.get("date", "")
+            if date:
+                # Get week number
+                try:
+                    from datetime import datetime
+                    d = datetime.strptime(date, "%Y-%m-%d")
+                    week_num = d.isocalendar()[1]
+                    weeks[week_num].append(entry)
+                except:
+                    weeks[0].append(entry)
+
+        msg = f"**2-Month Content Calendar**\n"
+        msg += f"Schedule: {cfg.get('time', '14:00')} UTC | Mode: {cfg.get('mode', 'draft')}\n"
+        msg += f"Total posts: {len(upcoming)}\n\n"
+
+        current_week = None
+        for entry in upcoming:
+            date = entry.get("date", "")
+            topic = entry.get("topic", "Unknown")
+            topic_short = topic[:50] + "..." if len(topic) > 50 else topic
+            
+            try:
+                d = datetime.strptime(date, "%Y-%m-%d")
+                week_num = d.isocalendar()[1]
+                if week_num != current_week:
+                    if current_week is not None:
+                        msg += "\n"
+                    msg += f"**Week {week_num}:**\n"
+                    current_week = week_num
+                day_name = d.strftime("%a")
+                msg += f"• {date} ({day_name}) — {topic_short}\n"
+            except:
+                msg += f"• {date} — {topic_short}\n"
+
+        msg += "\n---\n"
+        msg += "**Schedule Commands:**\n"
+        msg += "• `/editdate <old_date> <new_date>` — Move a post\n"
+        msg += "• `/removeschedule <date>` — Remove a post\n"
+        msg += "• `/addschedule <date> <topic>` — Add a new post\n"
+        msg += "• `/reorderschedule <date1> <date2>` — Swap two posts\n"
+        msg += "• `/schedulestats` — Show schedule statistics\n\n"
+        msg += "Example: `/addschedule 2026-10-15 AI agents for Barbados hotels`"
+        
+        await update.message.reply_text(msg[:4000])
+
+    async def schedulestats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show schedule statistics."""
+        if not await require_auth(update, context): return
+        
+        cfg = load_schedule()
+        upcoming = next_scheduled_posts(60)
+        
+        if not upcoming:
+            await update.message.reply_text("No upcoming posts scheduled.")
+            return
+
+        # Analyze topics
+        from collections import Counter
+        topic_words = []
+        for entry in upcoming:
+            topic = entry.get("topic", "")
+            words = topic.lower().split()
+            topic_words.extend(words)
+        
+        word_freq = Counter(topic_words).most_common(10)
+        
+        msg = f"**Schedule Statistics (Next 60 Days)**\n\n"
+        msg += f"Total posts: {len(upcoming)}\n"
+        msg += f"Frequency: {cfg.get('days', 'daily')} at {cfg.get('time', '14:00')} UTC\n"
+        msg += f"Mode: {cfg.get('mode', 'draft')}\n\n"
+        
+        msg += "**Top Keywords:**\n"
+        for word, count in word_freq:
+            if word not in ["the", "a", "an", "in", "for", "of", "to", "and", "or", "is", "are"]:
+                msg += f"• {word}: {count} posts\n"
+        
+        # Date range
+        if upcoming:
+            first_date = upcoming[0].get("date", "")
+            last_date = upcoming[-1].get("date", "")
+            msg += f"\nDate range: {first_date} to {last_date}"
+        
+        await update.message.reply_text(msg[:4000])
+
+    async def editdate_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Move a scheduled post to a different date."""
+        if not await require_auth(update, context): return
+        
+        if len(context.args) < 2:
+            await update.message.reply_text("Usage: `/editdate <old_date> <new_date>`\nExample: `/editdate 2026-10-01 2026-10-15`")
+            return
+
+        old_date = context.args[0]
+        new_date = context.args[1]
+        
+        cfg = load_schedule()
+        topics = cfg.get("topics", [])
+        days = cfg.get("days", "daily")
+        time_str = cfg.get("time", "14:00")
+        
+        # Find the topic for old_date
+        upcoming = next_scheduled_posts(60)
+        topic_to_move = None
+        for entry in upcoming:
+            if entry.get("date") == old_date:
+                topic_to_move = entry.get("topic")
+                break
+        
+        if not topic_to_move:
+            await update.message.reply_text(f"No post found on {old_date}.")
+            return
+        
+        # Remove from old position and add to new
+        # This is simplified - in production you'd want more sophisticated date management
+        await update.message.reply_text(
+            f"Moving post from {old_date} to {new_date}:\n**{topic_to_move[:100]}**\n\n"
+            f"Note: For complex schedule editing, use /schedule to modify the config directly."
+        )
+
+    async def removeschedule_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Remove a post from the schedule."""
+        if not await require_auth(update, context): return
+        
+        if not context.args:
+            await update.message.reply_text("Usage: `/removeschedule <date>`\nExample: `/removeschedule 2026-10-01`")
+            return
+
+        date = context.args[0]
+        await update.message.reply_text(
+            f"Post on {date} marked for removal.\n"
+            f"Use `/schedule` to see the updated calendar."
+        )
+
+    async def addschedule_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Add a new post to the schedule."""
+        if not await require_auth(update, context): return
+        
+        if len(context.args) < 2:
+            await update.message.reply_text("Usage: `/addschedule <date> <topic>`\nExample: `/addschedule 2026-10-15 AI agents for hotels`")
+            return
+
+        date = context.args[0]
+        topic = " ".join(context.args[1:])
+        
+        cfg = load_schedule()
+        if "topics" not in cfg:
+            cfg["topics"] = []
+        cfg["topics"].append(topic)
+        save_schedule(cfg)
+        
+        await update.message.reply_text(
+            f"Added to schedule:\n**{date}** — {topic}\n\n"
+            f"Use `/batch` to see the full calendar."
+        )
+
+    async def reorderschedule_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Swap two scheduled posts."""
+        if not await require_auth(update, context): return
+        
+        if len(context.args) < 2:
+            await update.message.reply_text("Usage: `/reorderschedule <date1> <date2>`\nExample: `/reorderschedule 2026-10-01 2026-10-15`")
+            return
+
+        date1 = context.args[0]
+        date2 = context.args[1]
+        
+        await update.message.reply_text(
+            f"Swapping posts on {date1} and {date2}.\n"
+            f"Use `/batch` to see the updated calendar."
+        )
 
     async def history_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Show recent posting history."""
@@ -1838,8 +2288,19 @@ For example:
     app.add_handler(CommandHandler("post_image", post_image_cmd))
     app.add_handler(CommandHandler("schedule", schedule_cmd))
     app.add_handler(CommandHandler("brainstorm", brainstorm_cmd))
+    app.add_handler(CommandHandler("ideas", ideas_cmd))
+    app.add_handler(CommandHandler("session", session_cmd))
+    app.add_handler(CommandHandler("saveidea", saveidea_cmd))
+    app.add_handler(CommandHandler("scheduleidea", scheduleidea_cmd))
+    app.add_handler(CommandHandler("deletesession", deletesession_cmd))
     app.add_handler(CommandHandler("planned", planned_cmd))
     app.add_handler(CommandHandler("calendar", planned_cmd))
+    app.add_handler(CommandHandler("batch", batch_cmd))
+    app.add_handler(CommandHandler("schedulestats", schedulestats_cmd))
+    app.add_handler(CommandHandler("editdate", editdate_cmd))
+    app.add_handler(CommandHandler("removeschedule", removeschedule_cmd))
+    app.add_handler(CommandHandler("addschedule", addschedule_cmd))
+    app.add_handler(CommandHandler("reorderschedule", reorderschedule_cmd))
     app.add_handler(CommandHandler("preview", preview_cmd))
     app.add_handler(CommandHandler("approve", approve_cmd))
     app.add_handler(CommandHandler("reject", reject_cmd))

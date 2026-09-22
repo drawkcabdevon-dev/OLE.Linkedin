@@ -73,20 +73,128 @@ CAMPAIGN_VISUALS = {
     },
 }
 
+# Topic-to-visual mapping for dynamic prompt generation
+TOPIC_VISUAL_KEYWORDS = {
+    "website": ["website mockup on laptop screen", "loading speed gauge", "mobile responsive design", "web analytics dashboard"],
+    "speed": ["light trails", "speedometer", "fast motion blur", "loading bar completion"],
+    "loading": ["progress bar", "clock ticking", "lightning bolt", "instant display"],
+    "ai": ["neural network visualization", "robot and human collaboration", "futuristic interface", "data streams flowing"],
+    "agent": ["digital assistant", "automation workflow", "24/7 operation", "chat interface"],
+    "chatbot": ["conversation bubbles", "customer service interface", "message notifications", "automated replies"],
+    "social media": ["phone with social feeds", "engagement metrics", "content calendar", "influencer aesthetic"],
+    "marketing": ["growth charts", "funnel visualization", "target audience", "conversion arrows"],
+    "data": ["analytics dashboard", "data visualization", "charts and graphs", "insights discovery"],
+    "brand": ["logo design process", "color palette", "brand guidelines", "visual identity"],
+    "barbados": ["tropical business setting", "caribbean office", "island skyline", "local business storefront"],
+    "tax": ["government documents", "financial savings", "tax forms with checkmarks", "filing system"],
+    "credit": ["money saving", "financial growth", "investment return", "budget allocation"],
+    "website speed": ["browser loading animation", "server rack", "CDN network", "optimization process"],
+    "digital transformation": ["modern office technology", "cloud computing", "digital workflow", "innovation"],
+    "online presence": ["search results", "google business profile", "online directory", "digital footprint"],
+    "lead generation": ["funnel visualization", "contact form", "landing page", "conversion funnel"],
+    "content": ["content calendar", "blog writing", "video production", "social scheduling"],
+    "analytics": ["dashboard with charts", "KPI metrics", "performance graphs", "data insights"],
+    "automation": ["workflow diagram", "robotic process", "scheduled tasks", "system integration"],
+    "SEO": ["search engine results", "keyword research", "google ranking", "organic traffic"],
+    "advertising": ["ad campaign setup", "budget allocation", "impression metrics", "targeting"],
+    "email": ["inbox notifications", "email template", "newsletter design", "open rate metrics"],
+    "video": ["video production", "camera equipment", "editing timeline", "thumbnail design"],
+    "mobile": ["smartphone app", "responsive design", "mobile optimization", "touch interface"],
+    "cloud": ["cloud servers", "data center", "cloud storage", "SaaS application"],
+    "security": ["shield protection", "lock icon", "encrypted data", "firewall"],
+    "ecommerce": ["online store", "shopping cart", "product listing", "checkout process"],
+    "customer": ["customer journey", "satisfaction survey", "feedback loop", "retention metrics"],
+    "growth": ["upward trend", "exponential curve", "market expansion", "revenue increase"],
+    "ROI": ["return on investment", "profit margin", "financial growth", "success metrics"],
+    "audit": ["website analysis", "performance report", "technical review", "optimization checklist"],
+    "assessment": ["evaluation form", "scoring system", "improvement areas", "action plan"],
+}
+
+
+def _generate_topic_visual(topic: str) -> dict:
+    """Generate a dynamic visual description based on the post topic.
+    
+    Returns dict with subject, mood, style tailored to the topic.
+    """
+    topic_lower = topic.lower()
+    
+    # Find matching visual keywords
+    matched_keywords = []
+    for keyword, visuals in TOPIC_VISUAL_KEYWORDS.items():
+        if keyword in topic_lower:
+            matched_keywords.extend(visuals)
+    
+    # If no specific match, use generic business/tech visuals
+    if not matched_keywords:
+        matched_keywords = [
+            "modern business professionals collaborating",
+            "digital technology interface",
+            "growth and innovation concept",
+            "professional workspace with screens"
+        ]
+    
+    # Pick 2-3 most relevant visuals (avoid too many)
+    import random
+    selected_visuals = random.sample(matched_keywords[:6], min(3, len(matched_keywords)))
+    
+    # Determine mood based on topic sentiment
+    if any(w in topic_lower for w in ["crisis", "problem", "losing", "failing", "stuck"]):
+        mood = "urgent, attention-grabbing, call to action"
+    elif any(w in topic_lower for w in ["growth", "success", "increase", "improve", "boost"]):
+        mood = "optimistic, upward trajectory, success-oriented"
+    elif any(w in topic_lower for w in ["ai", "automation", "future", "innovative"]):
+        mood = "futuristic, innovative, cutting-edge"
+    elif any(w in topic_lower for w in ["barbados", "local", "island", "caribbean"]):
+        mood = "tropical professional, local business pride, community"
+    else:
+        mood = "professional, confident, authoritative"
+    
+    # Determine style
+    if any(w in topic_lower for w in ["ai", "tech", "digital", "automation", "cloud"]):
+        style = "modern tech illustration with clean lines"
+    elif any(w in topic_lower for w in ["data", "analytics", "metrics", "roi"]):
+        style = "data visualization style with infographic elements"
+    elif any(w in topic_lower for w in ["brand", "design", "creative", "content"]):
+        style = "creative agency aesthetic with bold typography"
+    else:
+        style = "professional corporate photography with modern elements"
+    
+    return {
+        "subject": ", ".join(selected_visuals),
+        "mood": mood,
+        "style": style,
+    }
+
 
 def _social_prompt(campaign_id: str, post_text: str) -> str:
-    visual = CAMPAIGN_VISUALS.get(campaign_id, CAMPAIGN_VISUALS["brand_identity"])
+    """Generate a topic-relevant image prompt.
+    
+    If post_text is provided, generates dynamic visuals based on the topic.
+    Falls back to campaign-specific visuals if available.
+    """
+    # If we have post content, generate dynamic topic-relevant visuals
+    if post_text and len(post_text) > 20:
+        visual = _generate_topic_visual(post_text)
+    elif campaign_id and campaign_id in CAMPAIGN_VISUALS:
+        visual = CAMPAIGN_VISUALS[campaign_id]
+    else:
+        visual = CAMPAIGN_VISUALS["brand_identity"]
+    
     return (
-        f"Professional LinkedIn social media post graphic. "
-        f"{visual['style']} style. "
-        f"Subject: {visual['subject']}. "
-        f"Mood: {visual['mood']}. "
-        f"Color palette: dark navy blue background, bright blue (#4285F4), green (#34A853), red (#EA4335) accents. "
-        f"Modern, clean, high-end marketing agency aesthetic. "
-        f"Text overlay area on left/center with space for headline. "
-        f"Do NOT make it look like a website UI or app interface. "
-        f"It should look like a professional social media graphic created by a design agency. "
-        f"8k resolution, highly detailed, professional lighting."
+        f"Professional LinkedIn social media post graphic.\n"
+        f"Style: {visual['style']}.\n"
+        f"Visual elements: {visual['subject']}.\n"
+        f"Mood: {visual['mood']}.\n"
+        f"Color palette: Dark navy background (#202124), with accent colors bright blue (#4285F4), green (#34A853), red (#EA4335).\n"
+        f"Layout: Clean, modern design with the visual elements as the focal point. "
+        f"Leave space on left side for text overlay (headline area).\n"
+        f"Requirements:\n"
+        f"- Must look like a premium social media graphic, NOT a website screenshot\n"
+        f"- NO UI elements, buttons, or app interfaces\n"
+        f"- NO text or words in the image (text goes in post, not image)\n"
+        f"- Professional lighting, 8k quality, highly detailed\n"
+        f"- Suitable for LinkedIn professional audience\n"
+        f"- The image should visually represent the topic, not just show a generic brand"
     )
 
 
