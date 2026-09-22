@@ -620,6 +620,7 @@ def _notify(app_instance, text: str):
 # ── Bot ─────────────────────────────────────────────────────────────
 
 def main():
+    global NOTIFY_CHAT_ID
     TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     if not TOKEN:
         logger.error("TELEGRAM_BOT_TOKEN not set. Set it in .env")
