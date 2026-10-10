@@ -438,9 +438,9 @@ def generate_daily_ideas(count: int = 3) -> list[dict]:
 
 def generate_image_for_post(topic: str) -> str | None:
     """Generate a social graphic and return the path, or None.
-    Tries: Gemini 2.5 Flash Image → Stitch → Pollinations.ai.
+    Tries: Gemini 3.1 Flash Image → Stitch → Pollinations.ai.
     Uses topic-relevant prompts instead of generic brand imagery."""
-    # 1. Try Gemini 2.5 Flash Image (highest quality, ~$0.039/image)
+    # 1. Try Gemini 3.1 Flash Image (highest quality, ~$0.067/image)
     try:
         from gemini_client import generate_image
         from datetime import datetime
@@ -473,7 +473,7 @@ def generate_image_for_post(topic: str) -> str | None:
             filename = f"gemini_{ts}.png"
             out_path = ASSETS_DIR / filename
             out_path.write_bytes(img_data)
-            logger.info(f"Image generated via Gemini 2.5 Flash Image: {out_path}")
+            logger.info(f"Image generated via Gemini 3.1 Flash Image: {out_path}")
             return str(out_path)
         logger.warning("Gemini image gen returned no data")
     except Exception as e:

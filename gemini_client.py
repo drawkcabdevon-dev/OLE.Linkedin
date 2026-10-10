@@ -1,7 +1,7 @@
 """
 Shared Gemini client using the official google-genai SDK.
 Used by content_server, research_server, telegram_bot, and image_server.
-Handles both text generation and image generation via gemini-2.5-flash-image.
+Handles both text generation and image generation via gemini-3.1-flash-image.
 """
 
 import os
@@ -120,8 +120,9 @@ def generate_image(
     prompt: str,
     aspect_ratio: str = "1:1",
     max_retries: int = 3,
+    model: str = "gemini-3.1-flash-image",
 ) -> bytes | None:
-    """Generate an image using gemini-2.5-flash-image. Returns PNG bytes or None."""
+    """Generate an image using Gemini image models. Returns PNG bytes or None."""
     from google.genai import types
 
     client = _get_image_client()
@@ -130,7 +131,7 @@ def generate_image(
     for attempt in range(max_retries):
         try:
             response = client.models.generate_content(
-                model="gemini-2.5-flash-image",
+                model=model,
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     response_modalities=["IMAGE"],
@@ -143,8 +144,10 @@ def generate_image(
             for part in response.candidates[0].content.parts:
                 if hasattr(part, 'inline_data') and part.inline_data:
                     img_data = part.inline_data.data
-                    # Log usage (1290 tokens per image)
-                    _log_usage("gemini", "gemini-2.5-flash-image", 0, 1290, "generate_image")
+                    # Log usage (1120 output tokens per 1K image on 3.1)
+                    usage = response.usage_metadata
+                    out_tokens = getattr(usage, 'candidates_token_count', None) or 1120
+                    _log_usage("gemini", model, 0, out_tokens, "generate_image")
                     return img_data
             logger.warning("No image in Gemini response")
             return None
@@ -165,6 +168,7 @@ def generate_post_with_image(
     post_text: str,
     image_prompt: str,
     aspect_ratio: str = "1:1",
+    model: str = "gemini-3.1-flash-image",
 ) -> tuple[str, bytes | None]:
     """Generate a LinkedIn post AND its image in a single call.
     Returns (post_text, image_bytes or None)."""
@@ -174,7 +178,7 @@ def generate_post_with_image(
 
     try:
         response = client.models.generate_content(
-            model="gemini-2.5-flash-image",
+            model=model,
             contents=f"Create a LinkedIn post and a matching professional graphic.\n\nPost text:\n{post_text}\n\nImage prompt: {image_prompt}",
             config=types.GenerateContentConfig(
                 response_modalities=["TEXT", "IMAGE"],
@@ -192,7 +196,7 @@ def generate_post_with_image(
             if hasattr(part, 'inline_data') and part.inline_data:
                 img_data = part.inline_data.data
 
-        _log_usage("gemini", "gemini-2.5-flash-image", 0, 1290, "generate_post_with_image")
+        _log_usage("gemini", model, 0, 1120, "generate_post_with_image")
         return text or post_text, img_data
     except Exception as e:
         logger.warning(f"Gemini post+image error: {e}")

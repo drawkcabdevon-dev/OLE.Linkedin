@@ -1,7 +1,7 @@
 """
 Image Generation MCP Server
 Generates social media graphics using:
-  1. Gemini 2.5 Flash Image (highest quality, ~$0.039/image) — default
+  1. Gemini 3.1 Flash Image (highest quality, ~$0.067/image) — default
   2. Google Stitch (if STITCH_API_KEY is set) — UI design generation
   3. Pollinations.ai (free, no key required) — fallback
 
@@ -226,7 +226,7 @@ def _save_to_db(tool: str, campaign_id: str, prompt: str, image_path: str, post_
 
 
 def _call_gemini_image(prompt: str, aspect_ratio: str = "1:1") -> bytes | None:
-    """Call Gemini 2.5 Flash Image to generate an image. Returns PNG bytes or None."""
+    """Call Gemini 3.1 Flash Image to generate an image. Returns PNG bytes or None."""
     try:
         import sys
         sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -486,7 +486,7 @@ def generate_social_graphic(post_content: str, campaign_id: str = "", width: int
 
     prompt = _social_prompt(campaign_id, post_content)
 
-    # 1. Try Gemini 2.5 Flash Image (highest quality, ~$0.039/image)
+    # 1. Try Gemini 3.1 Flash Image (highest quality, ~$0.067/image)
     image_data = _call_gemini_image(prompt, aspect_ratio="1:1")
     if image_data:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -498,7 +498,7 @@ def generate_social_graphic(post_content: str, campaign_id: str = "", width: int
             "size_bytes": len(image_data),
             "width": width,
             "height": height,
-            "provider": "gemini-2.5-flash-image",
+            "provider": "gemini-3.1-flash-image",
             "campaign_id": campaign_id,
         }
         _save_to_db("gemini", campaign_id, prompt, str(out_path), post_content)

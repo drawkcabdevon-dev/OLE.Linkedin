@@ -15,6 +15,8 @@ DB_PATH = DATA_DIR / "data.db"
 # Pricing per 1K tokens (as of 2026)
 PRICING = {
     "gemini-2.5-flash": {"input": 0.075, "output": 0.30},
+    "gemini-3.1-flash-image": {"input": 0.0005, "output": 0.06},  # $0.50 / $60 per 1M → ~$0.067/1K image
+    "gemini-2.5-flash-image": {"input": 0.0003, "output": 0.03},  # deprecated 2026-10-02 → ~$0.039/image
     "nvidia/nemotron-3-ultra-550b": {"input": 0.0, "output": 0.0},  # free tier
     "nvidia/flux.1-schnell": {"input": 0.0, "output": 0.0},  # free tier
     "pollinations": {"input": 0.0, "output": 0.0},  # free
