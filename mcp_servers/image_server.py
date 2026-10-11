@@ -198,6 +198,76 @@ def _social_prompt(campaign_id: str, post_text: str) -> str:
     )
 
 
+def _detect_campaign(post_content: str) -> str:
+    """Map post text to a campaign id."""
+    post_lower = (post_content or "").lower()
+    if "78.7" in post_lower or "crisis" in post_lower:
+        return "crisis_78"
+    if "tax" in post_lower or "credit" in post_lower or "government" in post_lower:
+        return "tax_credit"
+    if "speed" in post_lower or "0.4" in post_lower or "second" in post_lower or "load" in post_lower:
+        return "website_speed"
+    if "ai" in post_lower or "agent" in post_lower or "24/7" in post_lower or "ollie" in post_lower:
+        return "ai_agents"
+    if "brand" in post_lower or "identity" in post_lower or "first impression" in post_lower:
+        return "brand_identity"
+    return "brand_identity"
+
+
+IMAGE_PROMPT_SYSTEM = """You are the art director for Online Everywhere (OLE), a data-driven AI marketing agency in Barbados serving SMEs.
+
+Given a LinkedIn post, produce ONE image-generation prompt.
+
+Think silently first:
+1. What is this post's core message — the single idea a reader walks away with?
+2. What concrete visual literally embodies THAT idea (a scene, object, or metaphor someone could shoot or render)? It must be specific to this post's argument, not a generic marketing graphic.
+
+Rules for the prompt you return:
+- Describe: subject/scene, setting, lighting, composition, style, color.
+- Base palette: deep navy background (#202124); accents bright blue (#4285F4), green (#34A853), red (#EA4335), used sparingly.
+- Composition: main subject centered or right of center; keep the left third quiet (dark negative space) for a headline overlay.
+- NO text, letters, numbers, words, logos, watermarks, UI screenshots, dashboards, or website mockups in the image. If the scene contains a sign, banner, screen, or label, describe it as blank — no lettering of any kind may appear.
+- Style: premium modern 3D illustration or cinematic photography — editorial quality, not clip art, not a template.
+- Match mood to the post's argument: urgent posts feel tense, opportunity posts feel bright.
+- Avoid cliches unless the post is literally about them: puzzle pieces, handshakes over skylines, rockets launching off charts, glowing brains.
+
+Return ONLY the final image prompt — one paragraph, 80-120 words. No preamble."""
+
+
+def _intent_image_prompt(post_content: str, campaign_id: str = "") -> str | None:
+    """Use Gemini text to author an image prompt matched to the post's intent.
+
+    Returns None on any failure so callers can fall back to heuristics.
+    """
+    try:
+        import sys
+        sys.path.insert(0, str(Path(__file__).parent.parent))
+        from gemini_client import generate_content
+        user = f"Campaign: {campaign_id or 'auto'}\n\nPost:\n{(post_content or '')[:1500]}"
+        prompt = generate_content(
+            IMAGE_PROMPT_SYSTEM, user, temperature=0.8, max_tokens=2048
+        )
+        prompt = (prompt or "").strip().strip('"').strip()
+        return prompt or None
+    except Exception as e:
+        import logging
+        logging.getLogger("image_server").warning(f"Intent prompt authoring failed: {e}")
+        return None
+
+
+def build_image_prompt(post_content: str, campaign_id: str = "") -> str:
+    """Build an image prompt that matches the post's intent.
+
+    Primary: Gemini authors a purpose-built prompt from the post's core message.
+    Fallback: keyword/campaign heuristics (_social_prompt).
+    """
+    if not campaign_id:
+        campaign_id = _detect_campaign(post_content)
+    return _intent_image_prompt(post_content, campaign_id) or _social_prompt(
+        campaign_id, post_content
+    )
+
+
 def _save_image(image_data: bytes, filename: str) -> Path:
     out = ASSETS_DIR / filename
     out.write_bytes(image_data)
@@ -424,8 +494,11 @@ def stitch_list_projects() -> str:
 
 @server.tool()
 def generate_image(prompt: str, width: int = 1200, height: int = 1200, model: str = "flux") -> str:
-    """Generate a social media graphic from a text prompt using Pollinations.ai.
-    
+    """Generate an image directly from a text prompt using Pollinations.ai (free fallback).
+
+    Prefer generate_social_graphic() — it uses Gemini 3.1 Flash Image first
+    (on-brand, higher quality) and only falls back to Stitch/Pollinations.
+
     Args:
         prompt: Detailed description of the image to generate.
         width: Image width (default 1200).
@@ -450,6 +523,7 @@ def generate_image(prompt: str, width: int = 1200, height: int = 1200, model: st
             "width": width,
             "height": height,
             "model": model,
+            "provider": "pollinations",
         }
         _save_to_db("pollinations", "custom", prompt, str(out_path), prompt)
         return json.dumps(result, indent=2)
@@ -462,7 +536,12 @@ def generate_image(prompt: str, width: int = 1200, height: int = 1200, model: st
 @server.tool()
 def generate_social_graphic(post_content: str, campaign_id: str = "", width: int = 1200, height: int = 1200) -> str:
     """Generate a social media graphic tailored to a post and campaign.
-    
+
+    The image prompt is authored from the post's core message (Gemini text),
+    so the visual matches the post's intent — not a generic brand template.
+    Primary render: Gemini 3.1 Flash Image (branded, ~$0.067/image).
+    Falls back to Stitch, then Pollinations (free).
+
     Args:
         post_content: The LinkedIn post text (used for auto-detecting campaign + context).
         campaign_id: Override campaign (crisis_78, tax_credit, website_speed, ai_agents, brand_identity).
@@ -470,21 +549,9 @@ def generate_social_graphic(post_content: str, campaign_id: str = "", width: int
         height: Image height (default 1200).
     """
     if not campaign_id:
-        post_lower = post_content.lower()
-        if "78.7" in post_lower or "crisis" in post_lower:
-            campaign_id = "crisis_78"
-        elif "tax" in post_lower or "credit" in post_lower or "government" in post_lower:
-            campaign_id = "tax_credit"
-        elif "speed" in post_lower or "0.4" in post_lower or "second" in post_lower or "load" in post_lower:
-            campaign_id = "website_speed"
-        elif "ai" in post_lower or "agent" in post_lower or "24/7" in post_lower or "ollie" in post_lower:
-            campaign_id = "ai_agents"
-        elif "brand" in post_lower or "identity" in post_lower or "first impression" in post_lower:
-            campaign_id = "brand_identity"
-        else:
-            campaign_id = "brand_identity"
+        campaign_id = _detect_campaign(post_content)
 
-    prompt = _social_prompt(campaign_id, post_content)
+    prompt = build_image_prompt(post_content, campaign_id)
 
     # 1. Try Gemini 3.1 Flash Image (highest quality, ~$0.067/image)
     image_data = _call_gemini_image(prompt, aspect_ratio="1:1")

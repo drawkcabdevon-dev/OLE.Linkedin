@@ -439,34 +439,14 @@ def generate_daily_ideas(count: int = 3) -> list[dict]:
 def generate_image_for_post(topic: str) -> str | None:
     """Generate a social graphic and return the path, or None.
     Tries: Gemini 3.1 Flash Image → Stitch → Pollinations.ai.
-    Uses topic-relevant prompts instead of generic brand imagery."""
+    The prompt is authored from the post's intent (not a fixed brand template)."""
     # 1. Try Gemini 3.1 Flash Image (highest quality, ~$0.067/image)
     try:
         from gemini_client import generate_image
         from datetime import datetime
-        from image_server import _generate_topic_visual, BRAND_COLORS
+        from image_server import build_image_prompt
 
-        # Generate topic-relevant visual description
-        visual = _generate_topic_visual(topic)
-        
-        prompt = (
-            f"Professional LinkedIn social media post graphic.\n"
-            f"Style: {visual['style']}.\n"
-            f"Visual elements: {visual['subject']}.\n"
-            f"Mood: {visual['mood']}.\n"
-            f"Color palette: Dark navy background ({BRAND_COLORS['navy']}), "
-            f"with accent colors bright blue ({BRAND_COLORS['primary']}), "
-            f"green ({BRAND_COLORS['green']}), red ({BRAND_COLORS['red']}).\n"
-            f"Layout: Clean, modern design with the visual elements as the focal point. "
-            f"Leave space on left side for text overlay (headline area).\n"
-            f"Requirements:\n"
-            f"- Must look like a premium social media graphic, NOT a website screenshot\n"
-            f"- NO UI elements, buttons, or app interfaces\n"
-            f"- NO text or words in the image (text goes in post, not image)\n"
-            f"- Professional lighting, 8k quality, highly detailed\n"
-            f"- Suitable for LinkedIn professional audience\n"
-            f"- The image should visually represent the topic: {topic}"
-        )
+        prompt = build_image_prompt(topic)
         img_data = generate_image(prompt, aspect_ratio="1:1")
         if img_data:
             ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -494,16 +474,17 @@ def generate_image_for_post(topic: str) -> str | None:
         except Exception as e:
             logger.warning(f"Stitch image gen error: {e}")
 
-    # 3. Fallback to Pollinations (free, no key, always works)
+    # 3. Fallback: full graphic chain (Gemini → Stitch → Pollinations)
     try:
-        result = json.loads(generate_social_graphic(topic, "modern"))
+        result = json.loads(generate_social_graphic(topic))
         path = result.get("output_path")
         if path:
-            logger.info(f"Image generated via Pollinations: {path}")
+            provider = result.get("provider") or result.get("model") or "unknown"
+            logger.info(f"Image generated via {provider}: {path}")
             return path
-        logger.warning(f"Pollinations image gen failed: {result.get('detail', 'unknown')}")
+        logger.warning(f"Graphic chain failed: {result.get('detail', 'unknown')}")
     except Exception as e:
-        logger.warning(f"Pollinations image gen error: {e}")
+        logger.warning(f"Graphic chain error: {e}")
 
     logger.error(f"All image providers failed for topic: {topic}")
     return None
