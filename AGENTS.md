@@ -18,7 +18,7 @@ telegram_bot.py          ← single main entrypoint
 gemini_client.py         ← Vertex AI Gemini client (ADC auth)
 mcp_servers/             ← 6 MCP servers imported directly (not subprocess)
   content_server.py      ← Gemini 2.5 Flash content generation
-  image_server.py        ← Pollinations.ai / Stitch images
+  image_server.py        ← Gemini 3.1 Flash Image (default) → Stitch → Pollinations fallback
   linkedin_server.py     ← LinkedIn API (post, image, search)
   local_server.py        ← SQLite (drafts, published, leads, calendar)
   research_server.py     ← Google Trends + Gemini research

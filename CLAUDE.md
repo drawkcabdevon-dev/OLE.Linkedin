@@ -35,9 +35,12 @@ via the MCP protocol (opencode handles this automatically).
 - `generate_carousel_script(topic, slide_count)` — multi-slide carousel script
 - `generate_batch_ideas(count)` — batch of post ideas
 
-### images server (Pollinations.ai — free, no key)
-- `generate_image(prompt, width, height)` — single image
-- `generate_social_graphic(topic, style)` — branded social graphic
+### images server (Gemini 3.1 Flash Image — primary; Stitch → Pollinations fallback)
+- `generate_social_graphic(post_content, campaign_id)` — branded social
+  graphic. **Use this for all image generation** — tries Gemini 3.1 Flash
+  Image first, then Stitch, then Pollinations.
+- `generate_image(prompt, width, height, model)` — direct Pollinations.ai
+  call (free fallback only, not on-brand — avoid unless the chain fails)
 - `generate_carousel_images(script, count)` — generate images from script
 
 ### local-data server (SQLite)

@@ -214,7 +214,7 @@ def generate_imagen_image(prompt: str) -> str:
         return json.dumps({
             "status": "unavailable",
             "detail": "Imagen requires a different Google Cloud project with Imagen enabled. "
-                      "Use the images MCP server (Pollinations.ai) instead.",
+                      "Use generate_social_graphic (Gemini 3.1 Flash Image) instead.",
         })
 
     import subprocess
