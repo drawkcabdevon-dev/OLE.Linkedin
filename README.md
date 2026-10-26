@@ -10,7 +10,7 @@ AI-powered social media management agent for **Online Everywhere** (onlineeveryw
 - **Content Memory** — Saved preferences (tone, length, style) persist across sessions and influence all drafts
 - **Trends Integration** — Google Trends + Gemini for data-driven topic selection
 - **Competitor Mirroring** — Analyze competitor posts, create counter-content
-- **Image Generation** — Pollinations.ai free-tier visuals; preview images in chat before posting
+- **Image Generation** — NVIDIA NIM (Stable Diffusion → FLUX.1-dev, free tier) with Gemini / Stitch / Pollinations fallback; preview images in chat before posting
 - **Premium Reference System** — Save liked photos as style references for future drafts
 - **Lead Tracking** — SQLite-based CRM for LinkedIn outreach
 - **Calendar Management** — Planned content calendar with topic rotation
@@ -88,7 +88,7 @@ Use `/preferences` to view and `/forget <key>` to remove.
 ├── mcp_servers/
 │   ├── linkedin_server.py   # LinkedIn API (post, image, search)
 │   ├── content_server.py    # Gemini 2.5 Flash content generation
-│   ├── image_server.py      # Pollinations.ai / Stitch image generation
+│   ├── image_server.py      # NVIDIA NIM (Stable Diffusion / FLUX) image generation
 │   ├── local_server.py      # SQLite (drafts, published, leads, calendar)
 │   ├── research_server.py   # Google Trends + Gemini research
 │   └── design_server.py     # HyperFrames/Seedance/Higgsfield motion graphics

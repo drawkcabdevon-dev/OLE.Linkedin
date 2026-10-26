@@ -18,7 +18,7 @@ telegram_bot.py          ← single main entrypoint
 gemini_client.py         ← Vertex AI Gemini client (ADC auth)
 mcp_servers/             ← 6 MCP servers imported directly (not subprocess)
   content_server.py      ← Gemini 2.5 Flash content generation
-  image_server.py        ← Gemini 3.1 Flash Image (default) → Stitch → Pollinations fallback
+  image_server.py        ← NVIDIA NIM (Stable Diffusion → FLUX.1-dev, default) → Gemini → Stitch → Pollinations
   linkedin_server.py     ← LinkedIn API (post, image, search)
   local_server.py        ← SQLite (drafts, published, leads, calendar)
   research_server.py     ← Google Trends + Gemini research
@@ -32,7 +32,7 @@ agent_engine_client.py   ← Optional Agent Engine client (env AGENT_ENGINE_RESO
 - **Always post as org**: `urn:li:organization:125564340` (Online Everywhere)
 - **No organic carousel** — LinkedIn API rejects CAROUSEL. Use `post_multi_image()` for scrollable gallery UX.
 - **No document posts** — DOCUMENT returns 403.
-- LinkedIn tokens stored in Secret Manager: `telegram-bot-token`, `linkedin-access-token`, `stitch-api-key`.
+- LinkedIn tokens stored in Secret Manager: `telegram-bot-token`, `linkedin-access-token`, `stitch-api-key`, `nvidia-api-key`.
 
 ## Bot behavior
 

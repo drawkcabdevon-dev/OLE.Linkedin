@@ -35,10 +35,13 @@ via the MCP protocol (opencode handles this automatically).
 - `generate_carousel_script(topic, slide_count)` — multi-slide carousel script
 - `generate_batch_ideas(count)` — batch of post ideas
 
-### images server (Gemini 3.1 Flash Image — primary; Stitch → Pollinations fallback)
+### images server (NVIDIA NIM — Stable Diffusion → FLUX.1-dev, then Gemini, Stitch, Pollinations)
 - `generate_social_graphic(post_content, campaign_id)` — branded social
-  graphic. **Use this for all image generation** — tries Gemini 3.1 Flash
-  Image first, then Stitch, then Pollinations.
+  graphic. **Use this for all image generation** — renders via NVIDIA NIM
+  (Stable Diffusion first, then FLUX.1-dev, free tier), then Gemini 3.1
+  Flash Image, then Stitch, then Pollinations.
+- `nvidia_generate_image(prompt, width, height, model)` — direct NVIDIA NIM
+  call; empty `model` walks the configured model chain.
 - `generate_image(prompt, width, height, model)` — direct Pollinations.ai
   call (free fallback only, not on-brand — avoid unless the chain fails)
 - `generate_carousel_images(script, count)` — generate images from script
