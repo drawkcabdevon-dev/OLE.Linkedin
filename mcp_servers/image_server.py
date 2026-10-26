@@ -11,7 +11,9 @@ Usage:
 """
 
 import json
+import logging
 import os
+import random
 import time
 from datetime import datetime
 from pathlib import Path
@@ -24,6 +26,7 @@ from mcp.server.fastmcp import FastMCP
 load_dotenv(Path.home() / "social-agent" / ".env")
 load_dotenv(Path.home() / ".social-agent" / ".env", override=False)
 
+logger = logging.getLogger("image_server")
 server = FastMCP("images")
 
 DATA_DIR = Path(os.getenv("OLE_DATA_DIR", str(Path(__file__).parent.parent)))
@@ -65,6 +68,13 @@ NVIDIA_SAMPLING = {
     "black-forest-labs/flux.1-schnell": {"cfg_scale": 0, "steps": 4},
     "black-forest-labs/flux.2-klein-4b": {"cfg_scale": 1, "steps": 4},
 }
+
+# FLUX occasionally returns a collapsed, near-solid frame. Measured across
+# ~40 renders: genuine collapses sit at max channel stddev 0.7-1.5, the worst
+# legitimate render was 2.8, and good ones run 5-74. Anything under the floor
+# is a failed render and gets retried with a fresh seed.
+MIN_IMAGE_STDDEV = 2.5
+NVIDIA_RENDER_ATTEMPTS = 5
 
 POLLINATIONS_BASE = "https://image.pollinations.ai/prompt"
 
@@ -184,9 +194,9 @@ def _generate_topic_visual(topic: str) -> dict:
     if any(w in topic_lower for w in ["ai", "tech", "digital", "automation", "cloud"]):
         style = "modern tech illustration with clean lines"
     elif any(w in topic_lower for w in ["data", "analytics", "metrics", "roi"]):
-        style = "data visualization style with infographic elements"
+        style = "3D data visualization with abstract geometric forms, no labels"
     elif any(w in topic_lower for w in ["brand", "design", "creative", "content"]):
-        style = "creative agency aesthetic with bold typography"
+        style = "creative agency aesthetic with sculptural shapes, no lettering"
     else:
         style = "professional corporate photography with modern elements"
     
@@ -218,14 +228,16 @@ def _social_prompt(campaign_id: str, post_text: str) -> str:
         f"Mood: {visual['mood']}.\n"
         f"Color palette: Dark navy background (#202124), with accent colors bright blue (#4285F4), green (#34A853), red (#EA4335).\n"
         f"Layout: Clean, modern design with the visual elements as the focal point. "
-        f"Leave space on left side for text overlay (headline area).\n"
+        f"Keep the left third as quiet dark negative space for a headline.\n"
         f"Requirements:\n"
         f"- Must look like a premium social media graphic, NOT a website screenshot\n"
-        f"- NO UI elements, buttons, or app interfaces\n"
-        f"- NO text or words in the image (text goes in post, not image)\n"
+        f"- NO UI elements, buttons, charts with axes, dials, or app interfaces\n"
         f"- Professional lighting, 8k quality, highly detailed\n"
         f"- Suitable for LinkedIn professional audience\n"
-        f"- The image should visually represent the topic, not just show a generic brand"
+        f"- The image should visually represent the topic, not just show a generic brand\n"
+        f"Critical: the image must be completely free of any text. No words, letters, "
+        f"numbers, symbols, captions, labels, titles, logos or watermarks anywhere. "
+        f"Every surface, sign and screen is blank. Text goes in the post, never in the image."
     )
 
 
@@ -402,9 +414,45 @@ def _nvidia_payload(prompt: str, width: int, height: int, model: str) -> dict:
         "prompt": prompt,
         "width": width,
         "height": height,
-        "seed": int(time.time()) % (2**31),
+        "seed": random.randint(0, 2**31 - 1),
         **sampling,
     }
+
+
+def _image_quality_ok(image_data: bytes) -> bool:
+    """Reject degenerate renders (near-solid frames). Undecodable = accepted."""
+    try:
+        import io
+        from PIL import Image, ImageStat
+
+        im = Image.open(io.BytesIO(image_data)).convert("RGB")
+        return max(ImageStat.Stat(im).stddev) >= MIN_IMAGE_STDDEV
+    except Exception:
+        return True
+
+
+_OCR = None
+
+
+def _image_has_text(image_data: bytes) -> bool:
+    """Best-effort OCR check for accidental lettering. False when unavailable."""
+    global _OCR
+    if _OCR is None:
+        try:
+            import pytesseract
+            _OCR = pytesseract
+        except Exception:
+            _OCR = False
+    if not _OCR:
+        return False
+    try:
+        import io
+        from PIL import Image
+
+        im = Image.open(io.BytesIO(image_data)).convert("L")
+        return bool(_OCR.image_to_string(im).strip())
+    except Exception:
+        return False
 
 
 def _parse_nvidia_image(data: dict) -> bytes | None:
@@ -435,28 +483,61 @@ def _call_nvidia_image(
     height: int = 1024,
     model: str = "stabilityai/stable-diffusion-3-medium",
     timeout: int = 120,
+    attempts: int = NVIDIA_RENDER_ATTEMPTS,
 ) -> bytes | None:
-    """Call an NVIDIA NIM image model. Returns raw image bytes or None."""
+    """Call an NVIDIA NIM image model. Returns raw image bytes or None.
+
+    Retries with a fresh seed when the model returns a collapsed/near-solid
+    frame, and gives up on the model after `attempts` bad renders.
+    """
     api_key = NVIDIA_API_KEY or os.getenv("NVIDIA_API_KEY", "")
     if not api_key:
         return None
 
     width, height = _snap_size(width), _snap_size(height)
-    payload = _nvidia_payload(prompt, width, height, model)
     url = f"{NVIDIA_BASE_URL}/{model}"
+    use_minimal = False
 
-    try:
-        r = httpx.post(url, json=payload, headers=_nvidia_headers(api_key), timeout=timeout)
-        if r.status_code == 422:
-            # Model rejected optional sampling params — retry with the bare minimum.
-            minimal = {k: payload[k] for k in ("prompt", "width", "height")}
-            r = httpx.post(url, json=minimal, headers=_nvidia_headers(api_key), timeout=timeout)
-        r.raise_for_status()
-        return _parse_nvidia_image(r.json())
-    except Exception as e:
-        import logging
-        logging.getLogger("image_server").warning(f"NVIDIA image error ({model}): {e}")
-        return None
+    for attempt in range(max(1, attempts)):
+        payload = _nvidia_payload(prompt, width, height, model)
+        if use_minimal:
+            payload = {k: payload[k] for k in ("prompt", "width", "height")}
+
+        try:
+            r = httpx.post(url, json=payload, headers=_nvidia_headers(api_key), timeout=timeout)
+            if r.status_code == 422 and not use_minimal:
+                # Model rejected the sampling params — bare payload from here on.
+                use_minimal = True
+                payload = {k: payload[k] for k in ("prompt", "width", "height")}
+                r = httpx.post(url, json=payload, headers=_nvidia_headers(api_key), timeout=timeout)
+            if r.status_code == 429 or r.status_code >= 500:
+                logger.warning(f"NVIDIA {r.status_code} ({model}, attempt {attempt + 1}/{attempts}) — backing off")
+                time.sleep(3 * (attempt + 1))
+                continue
+            r.raise_for_status()
+            image_data = _parse_nvidia_image(r.json())
+        except httpx.HTTPStatusError as e:
+            # 4xx other than 422 is permanent for this model (e.g. not entitled).
+            logger.warning(f"NVIDIA image error ({model}): {e}")
+            return None
+        except Exception as e:
+            logger.warning(f"NVIDIA image error ({model}, attempt {attempt + 1}/{attempts}): {e}")
+            time.sleep(3 * (attempt + 1))
+            continue
+
+        if image_data is None:
+            logger.warning(f"NVIDIA returned no image ({model})")
+            return None
+        quality_ok = _image_quality_ok(image_data)
+        if quality_ok and not _image_has_text(image_data):
+            return image_data
+        reason = "collapsed" if not quality_ok else "contains text"
+        logger.warning(
+            f"NVIDIA {reason} render ({model}, attempt {attempt + 1}/{attempts}) — retrying"
+        )
+
+    logger.warning(f"NVIDIA produced only unusable renders for {model} — trying next model")
+    return None
 
 
 def _call_nvidia_chain(prompt: str, width: int = 1024, height: int = 1024) -> tuple[bytes, str] | None:
