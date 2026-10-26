@@ -18,7 +18,7 @@ gcloud artifacts repositories create ole-agent \
   --description="OLE Agent Docker images" 2>/dev/null || echo "Repo already exists"
 
 echo "==> Checking secrets in Secret Manager"
-for SECRET in telegram-bot-token gemini-api-key linkedin-access-token; do
+for SECRET in telegram-bot-token gemini-api-key linkedin-access-token stitch-api-key nvidia-api-key; do
   if gcloud secrets describe "$SECRET" &>/dev/null; then
     echo "  $SECRET exists"
   else
@@ -30,7 +30,7 @@ done
 echo "==> Granting Cloud Run access to secrets"
 PROJECT_NUM=$(gcloud projects describe "$PROJECT" --format="value(projectNumber)")
 SERVICE_ACCOUNT="$PROJECT_NUM-compute@developer.gserviceaccount.com"
-for SECRET in telegram-bot-token gemini-api-key linkedin-access-token; do
+for SECRET in telegram-bot-token gemini-api-key linkedin-access-token stitch-api-key nvidia-api-key; do
   gcloud secrets add-iam-policy-binding "$SECRET" \
     --member="serviceAccount:$SERVICE_ACCOUNT" \
     --role="roles/secretmanager.secretAccessor" 2>/dev/null || true

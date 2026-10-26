@@ -12,3 +12,5 @@ premium_examples/*.jpeg
 !premium_examples/.gitkeep
 .DS_Store
 data.db
+.env
+assets/

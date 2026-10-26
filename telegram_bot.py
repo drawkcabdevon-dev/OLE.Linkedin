@@ -438,43 +438,24 @@ def generate_daily_ideas(count: int = 3) -> list[dict]:
 
 def generate_image_for_post(topic: str) -> str | None:
     """Generate a social graphic and return the path, or None.
-    Tries: Gemini 3.1 Flash Image → Stitch → Pollinations.ai.
+    Tries: NVIDIA NIM (Stable Diffusion → FLUX.1-dev) → Gemini → Stitch → Pollinations.
     The prompt is authored from the post's intent (not a fixed brand template)."""
-    # 1. Try Gemini 3.1 Flash Image (highest quality, ~$0.067/image)
+    # 1. NVIDIA NIM (Stable Diffusion → FLUX.1-dev) → Gemini → Stitch → Pollinations
     try:
-        from gemini_client import generate_image
-        from datetime import datetime
-        from image_server import build_image_prompt
+        from image_server import build_image_prompt, render_image
 
         prompt = build_image_prompt(topic)
-        img_data = generate_image(prompt, aspect_ratio="1:1")
-        if img_data:
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"gemini_{ts}.png"
-            out_path = ASSETS_DIR / filename
-            out_path.write_bytes(img_data)
-            logger.info(f"Image generated via Gemini 3.1 Flash Image: {out_path}")
-            return str(out_path)
-        logger.warning("Gemini image gen returned no data")
+        result = render_image(prompt)
+        path = result.get("output_path")
+        if path:
+            provider = result.get("model") or result.get("provider") or "unknown"
+            logger.info(f"Image generated via {provider}: {path}")
+            return str(path)
+        logger.warning(f"Image chain failed: {result.get('detail', 'unknown')}")
     except Exception as e:
-        logger.warning(f"Gemini image gen error: {e}")
+        logger.warning(f"Image chain error: {e}")
 
-    # 2. Try Stitch (if configured)
-    stitch_key = os.getenv("STITCH_API_KEY", "").strip()
-    stitch_project = os.getenv("STITCH_PROJECT_ID", "").strip()
-    if stitch_key and stitch_project:
-        try:
-            from image_server import stitch_generate_image
-            result = json.loads(stitch_generate_image(topic))
-            path = result.get("output_path")
-            if path:
-                logger.info(f"Image generated via Stitch: {path}")
-                return path
-            logger.warning(f"Stitch image gen failed: {result.get('detail', 'unknown')}")
-        except Exception as e:
-            logger.warning(f"Stitch image gen error: {e}")
-
-    # 3. Fallback: full graphic chain (Gemini → Stitch → Pollinations)
+    # 2. Fallback: full graphic chain (authors its own prompt)
     try:
         result = json.loads(generate_social_graphic(topic))
         path = result.get("output_path")

@@ -1,16 +1,19 @@
 """
 Image Generation MCP Server
 Generates social media graphics using:
-  1. Gemini 3.1 Flash Image (highest quality, ~$0.067/image) — default
-  2. Google Stitch (if STITCH_API_KEY is set) — UI design generation
-  3. Pollinations.ai (free, no key required) — fallback
+  1. NVIDIA NIM (default, free tier) — Stable Diffusion first, then FLUX.1-dev
+  2. Gemini 3.1 Flash Image (~$0.067/image)
+  3. Google Stitch (if STITCH_API_KEY is set) — UI design generation
+  4. Pollinations.ai (free, no key required) — fallback
 
 Usage:
   python image_server.py
 """
 
 import json
+import logging
 import os
+import random
 import time
 from datetime import datetime
 from pathlib import Path
@@ -23,6 +26,7 @@ from mcp.server.fastmcp import FastMCP
 load_dotenv(Path.home() / "social-agent" / ".env")
 load_dotenv(Path.home() / ".social-agent" / ".env", override=False)
 
+logger = logging.getLogger("image_server")
 server = FastMCP("images")
 
 DATA_DIR = Path(os.getenv("OLE_DATA_DIR", str(Path(__file__).parent.parent)))
@@ -33,7 +37,44 @@ DB_DIR = DATA_DIR
 STITCH_API_KEY = os.getenv("STITCH_API_KEY", "")
 STITCH_PROJECT_ID = os.getenv("STITCH_PROJECT_ID", "")
 NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "")
-NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
+NVIDIA_BASE_URL = "https://ai.api.nvidia.com/v1/genai"
+
+# Model chain: Stable Diffusion first (the whole point of this integration),
+# then FLUX.1-dev which is NVIDIA's most reliable hosted image endpoint.
+# Override with NVIDIA_IMAGE_MODEL (single model) or
+# NVIDIA_IMAGE_MODELS (comma-separated, tried in order).
+DEFAULT_NVIDIA_MODELS = [
+    "stabilityai/stable-diffusion-3-medium",
+    "stabilityai/sdxl-turbo",
+    "black-forest-labs/flux.1-dev",
+]
+NVIDIA_MODELS = [
+    m.strip()
+    for m in os.getenv("NVIDIA_IMAGE_MODELS", ",".join(DEFAULT_NVIDIA_MODELS)).split(",")
+    if m.strip()
+]
+if os.getenv("NVIDIA_IMAGE_MODEL", "").strip():
+    NVIDIA_MODELS = [os.getenv("NVIDIA_IMAGE_MODEL").strip()] + [
+        m for m in NVIDIA_MODELS if m != os.getenv("NVIDIA_IMAGE_MODEL").strip()
+    ]
+
+# The hosted endpoint only accepts these discrete dimensions (steps of 64).
+NVIDIA_SIZES = (768, 832, 896, 960, 1024, 1088, 1152, 1216, 1280, 1344)
+
+# Per-model sampling defaults. Anything a model rejects is dropped by the
+# 422-retry in _call_nvidia_image, so these are best-effort tuning knobs.
+NVIDIA_SAMPLING = {
+    "stabilityai/sdxl-turbo": {"cfg_scale": 0, "steps": 4},
+    "black-forest-labs/flux.1-schnell": {"cfg_scale": 0, "steps": 4},
+    "black-forest-labs/flux.2-klein-4b": {"cfg_scale": 1, "steps": 4},
+}
+
+# FLUX occasionally returns a collapsed, near-solid frame. Measured across
+# ~40 renders: genuine collapses sit at max channel stddev 0.7-1.5, the worst
+# legitimate render was 2.8, and good ones run 5-74. Anything under the floor
+# is a failed render and gets retried with a fresh seed.
+MIN_IMAGE_STDDEV = 2.5
+NVIDIA_RENDER_ATTEMPTS = 5
 
 POLLINATIONS_BASE = "https://image.pollinations.ai/prompt"
 
@@ -153,9 +194,9 @@ def _generate_topic_visual(topic: str) -> dict:
     if any(w in topic_lower for w in ["ai", "tech", "digital", "automation", "cloud"]):
         style = "modern tech illustration with clean lines"
     elif any(w in topic_lower for w in ["data", "analytics", "metrics", "roi"]):
-        style = "data visualization style with infographic elements"
+        style = "3D data visualization with abstract geometric forms, no labels"
     elif any(w in topic_lower for w in ["brand", "design", "creative", "content"]):
-        style = "creative agency aesthetic with bold typography"
+        style = "creative agency aesthetic with sculptural shapes, no lettering"
     else:
         style = "professional corporate photography with modern elements"
     
@@ -187,14 +228,16 @@ def _social_prompt(campaign_id: str, post_text: str) -> str:
         f"Mood: {visual['mood']}.\n"
         f"Color palette: Dark navy background (#202124), with accent colors bright blue (#4285F4), green (#34A853), red (#EA4335).\n"
         f"Layout: Clean, modern design with the visual elements as the focal point. "
-        f"Leave space on left side for text overlay (headline area).\n"
+        f"Keep the left third as quiet dark negative space for a headline.\n"
         f"Requirements:\n"
         f"- Must look like a premium social media graphic, NOT a website screenshot\n"
-        f"- NO UI elements, buttons, or app interfaces\n"
-        f"- NO text or words in the image (text goes in post, not image)\n"
+        f"- NO UI elements, buttons, charts with axes, dials, or app interfaces\n"
         f"- Professional lighting, 8k quality, highly detailed\n"
         f"- Suitable for LinkedIn professional audience\n"
-        f"- The image should visually represent the topic, not just show a generic brand"
+        f"- The image should visually represent the topic, not just show a generic brand\n"
+        f"Critical: the image must be completely free of any text. No words, letters, "
+        f"numbers, symbols, captions, labels, titles, logos or watermarks anywhere. "
+        f"Every surface, sign and screen is blank. Text goes in the post, never in the image."
     )
 
 
@@ -351,69 +394,272 @@ def _call_stitch_api(prompt: str) -> bytes | None:
         return None
 
 
-def _call_nvidia_image(prompt: str, width: int = 1024, height: int = 1024, model: str = "flux.1-schnell") -> bytes | None:
-    """Call NVIDIA NIM image generation API. Returns raw image bytes or None."""
-    api_key = NVIDIA_API_KEY or os.getenv("NVIDIA_API_KEY", "")
-    if not api_key:
-        return None
+def _snap_size(value: int) -> int:
+    """Snap a requested dimension to the nearest size the endpoint accepts."""
+    return min(NVIDIA_SIZES, key=lambda s: abs(s - value))
 
-    headers = {
+
+def _nvidia_headers(api_key: str) -> dict:
+    return {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
         "Accept": "application/json",
     }
-    payload = {
-        "model": model,
+
+
+def _nvidia_payload(prompt: str, width: int, height: int, model: str) -> dict:
+    sampling = {"cfg_scale": 7, "steps": 30}
+    sampling.update(NVIDIA_SAMPLING.get(model, {}))
+    return {
         "prompt": prompt,
-        "n": 1,
-        "size": f"{width}x{height}",
-        "response_format": "b64_json",
+        "width": width,
+        "height": height,
+        "seed": random.randint(0, 2**31 - 1),
+        **sampling,
     }
 
+
+def _image_quality_ok(image_data: bytes) -> bool:
+    """Reject degenerate renders (near-solid frames). Undecodable = accepted."""
     try:
-        r = httpx.post(
-            f"{NVIDIA_BASE_URL}/images/generations",
-            json=payload,
-            headers=headers,
-            timeout=120,
-        )
-        r.raise_for_status()
-        data = r.json()
-        images = data.get("data", [])
-        if not images:
-            return None
-        import base64
-        return base64.b64decode(images[0].get("b64_json", ""))
-    except Exception as e:
-        import logging
-        logging.getLogger("image_server").warning(f"NVIDIA image API error: {e}")
+        import io
+        from PIL import Image, ImageStat
+
+        im = Image.open(io.BytesIO(image_data)).convert("RGB")
+        return max(ImageStat.Stat(im).stddev) >= MIN_IMAGE_STDDEV
+    except Exception:
+        return True
+
+
+_OCR = None
+
+
+def _image_has_text(image_data: bytes) -> bool:
+    """Best-effort OCR check for accidental lettering. False when unavailable."""
+    global _OCR
+    if _OCR is None:
+        try:
+            import pytesseract
+            _OCR = pytesseract
+        except Exception:
+            _OCR = False
+    if not _OCR:
+        return False
+    try:
+        import io
+        from PIL import Image
+
+        im = Image.open(io.BytesIO(image_data)).convert("L")
+        return bool(_OCR.image_to_string(im).strip())
+    except Exception:
+        return False
+
+
+def _parse_nvidia_image(data: dict) -> bytes | None:
+    """Parse either the NIM `artifacts[].base64` or OpenAI `data[].b64_json` shape."""
+    import base64
+
+    artifacts = data.get("artifacts") or []
+    if artifacts and artifacts[0].get("base64"):
+        return base64.b64decode(artifacts[0]["base64"])
+
+    for entry in data.get("data") or []:
+        raw = entry.get("b64_json") or entry.get("url")
+        if not raw:
+            continue
+        if raw.startswith("data:"):
+            raw = raw.split(",", 1)[1]
+        if entry.get("b64_json"):
+            return base64.b64decode(raw)
+        fetched = httpx.get(raw, timeout=60, follow_redirects=True)
+        fetched.raise_for_status()
+        return fetched.content
+    return None
+
+
+def _call_nvidia_image(
+    prompt: str,
+    width: int = 1024,
+    height: int = 1024,
+    model: str = "stabilityai/stable-diffusion-3-medium",
+    timeout: int = 120,
+    attempts: int = NVIDIA_RENDER_ATTEMPTS,
+) -> bytes | None:
+    """Call an NVIDIA NIM image model. Returns raw image bytes or None.
+
+    Retries with a fresh seed when the model returns a collapsed/near-solid
+    frame, and gives up on the model after `attempts` bad renders.
+    """
+    api_key = NVIDIA_API_KEY or os.getenv("NVIDIA_API_KEY", "")
+    if not api_key:
         return None
+
+    width, height = _snap_size(width), _snap_size(height)
+    url = f"{NVIDIA_BASE_URL}/{model}"
+    use_minimal = False
+
+    for attempt in range(max(1, attempts)):
+        payload = _nvidia_payload(prompt, width, height, model)
+        if use_minimal:
+            payload = {k: payload[k] for k in ("prompt", "width", "height")}
+
+        try:
+            r = httpx.post(url, json=payload, headers=_nvidia_headers(api_key), timeout=timeout)
+            if r.status_code == 422 and not use_minimal:
+                # Model rejected the sampling params — bare payload from here on.
+                use_minimal = True
+                payload = {k: payload[k] for k in ("prompt", "width", "height")}
+                r = httpx.post(url, json=payload, headers=_nvidia_headers(api_key), timeout=timeout)
+            if r.status_code == 429 or r.status_code >= 500:
+                logger.warning(f"NVIDIA {r.status_code} ({model}, attempt {attempt + 1}/{attempts}) — backing off")
+                time.sleep(3 * (attempt + 1))
+                continue
+            r.raise_for_status()
+            image_data = _parse_nvidia_image(r.json())
+        except httpx.HTTPStatusError as e:
+            # 4xx other than 422 is permanent for this model (e.g. not entitled).
+            logger.warning(f"NVIDIA image error ({model}): {e}")
+            return None
+        except Exception as e:
+            logger.warning(f"NVIDIA image error ({model}, attempt {attempt + 1}/{attempts}): {e}")
+            time.sleep(3 * (attempt + 1))
+            continue
+
+        if image_data is None:
+            logger.warning(f"NVIDIA returned no image ({model})")
+            return None
+        quality_ok = _image_quality_ok(image_data)
+        if quality_ok and not _image_has_text(image_data):
+            return image_data
+        reason = "collapsed" if not quality_ok else "contains text"
+        logger.warning(
+            f"NVIDIA {reason} render ({model}, attempt {attempt + 1}/{attempts}) — retrying"
+        )
+
+    logger.warning(f"NVIDIA produced only unusable renders for {model} — trying next model")
+    return None
+
+
+def _call_nvidia_chain(prompt: str, width: int = 1024, height: int = 1024) -> tuple[bytes, str] | None:
+    """Try each configured NVIDIA model in order. Returns (bytes, model) or None."""
+    if not (NVIDIA_API_KEY or os.getenv("NVIDIA_API_KEY", "")):
+        return None
+    for model in NVIDIA_MODELS:
+        image_data = _call_nvidia_image(prompt, width, height, model)
+        if image_data:
+            return image_data, model
+    return None
+
+
+def render_image(
+    prompt: str,
+    width: int = 1200,
+    height: int = 1200,
+    campaign_id: str = "",
+    post_content: str = "",
+) -> dict:
+    """Render a prompt through the full provider chain.
+
+    Order: NVIDIA (Stable Diffusion → FLUX.1-dev) → Gemini → Stitch → Pollinations.
+
+    Returns a dict with status/output_path on success, or status=error/detail.
+    """
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    campaign = campaign_id or "custom"
+    context = post_content or prompt
+
+    # 1. NVIDIA NIM — Stable Diffusion first, then FLUX.1-dev
+    nvidia = _call_nvidia_chain(prompt, width, height)
+    if nvidia:
+        image_data, model = nvidia
+        ext = "jpg" if image_data[:3] == b"\xff\xd8\xff" else "png"
+        slug = model.rsplit("/", 1)[-1].replace(".", "-")
+        out_path = _save_image(image_data, f"social_nvidia_{slug}_{ts}.{ext}")
+        result = {
+            "status": "generated",
+            "output_path": str(out_path),
+            "size_bytes": len(image_data),
+            "width": _snap_size(width),
+            "height": _snap_size(height),
+            "provider": "nvidia",
+            "model": model,
+        }
+        _save_to_db("nvidia", campaign, prompt, str(out_path), context)
+        try:
+            from cost_tracker import log_api_call
+            log_api_call("nvidia", model, 0, 0, "v1/genai")
+        except Exception:
+            pass
+        return result
+
+    # 2. Gemini 3.1 Flash Image
+    image_data = _call_gemini_image(prompt, aspect_ratio="1:1")
+    if image_data:
+        out_path = _save_image(image_data, f"social_gemini_{ts}.png")
+        _save_to_db("gemini", campaign, prompt, str(out_path), context)
+        return {
+            "status": "generated",
+            "output_path": str(out_path),
+            "size_bytes": len(image_data),
+            "width": width,
+            "height": height,
+            "provider": "gemini-3.1-flash-image",
+        }
+
+    # 3. Google Stitch (if configured)
+    if (STITCH_API_KEY or os.getenv("STITCH_API_KEY", "")) and (
+        STITCH_PROJECT_ID or os.getenv("STITCH_PROJECT_ID", "")
+    ):
+        image_data = _call_stitch_api(prompt)
+        if image_data:
+            out_path = _save_image(image_data, f"social_stitch_{ts}.png")
+            _save_to_db("stitch", campaign, prompt, str(out_path), context)
+            return {
+                "status": "generated",
+                "output_path": str(out_path),
+                "size_bytes": len(image_data),
+                "width": width,
+                "height": height,
+                "provider": "stitch",
+            }
+
+    # 4. Pollinations (free, always works)
+    return json.loads(generate_image(prompt, width, height, model="flux"))
 
 
 @server.tool()
-def nvidia_generate_image(prompt: str, width: int = 1024, height: int = 1024, model: str = "flux.1-schnell") -> str:
-    """Generate an image using NVIDIA NIM (high quality, OpenAI-compatible).
+def nvidia_generate_image(prompt: str, width: int = 1024, height: int = 1024, model: str = "") -> str:
+    """Generate an image using NVIDIA NIM (Stable Diffusion / FLUX).
 
     Requires NVIDIA_API_KEY in .env.
 
     Args:
         prompt: Description of the image to generate.
-        width: Image width (default 1024).
-        height: Image height (default 1024).
-        model: NVIDIA model — 'flux.1-schnell' (fast, free tier),
-               'flux.1-dev' (high quality), 'stable-diffusion-3.5-large'.
+        width: Image width (default 1024, snapped to a size the endpoint accepts).
+        height: Image height (default 1024, snapped to a size the endpoint accepts).
+        model: NVIDIA model id — 'stabilityai/stable-diffusion-3-medium',
+               'stabilityai/sdxl-turbo', 'black-forest-labs/flux.1-dev'.
+               Leave empty to walk the configured model chain.
     """
     api_key = NVIDIA_API_KEY or os.getenv("NVIDIA_API_KEY", "")
     if not api_key:
         return json.dumps({"status": "error", "detail": "NVIDIA_API_KEY not set in .env"})
 
-    image_data = _call_nvidia_image(prompt, width, height, model)
+    used_model = model
+    if model:
+        image_data = _call_nvidia_image(prompt, width, height, model)
+    else:
+        chained = _call_nvidia_chain(prompt, width, height)
+        image_data, used_model = chained if chained else (None, "")
     if image_data is None:
-        return json.dumps({"status": "error", "detail": "NVIDIA API returned no image"})
+        return json.dumps({
+            "status": "error",
+            "detail": f"NVIDIA API returned no image (tried: {model or ', '.join(NVIDIA_MODELS)})",
+        })
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"nvidia_{ts}.png"
-    out_path = _save_image(image_data, filename)
+    ext = "jpg" if image_data[:3] == b"\xff\xd8\xff" else "png"
+    out_path = _save_image(image_data, f"nvidia_{ts}.{ext}")
 
     result = {
         "status": "generated",
@@ -422,13 +668,13 @@ def nvidia_generate_image(prompt: str, width: int = 1024, height: int = 1024, mo
         "width": width,
         "height": height,
         "provider": "nvidia",
-        "model": model,
+        "model": used_model,
     }
     _save_to_db("nvidia", "custom", prompt, str(out_path), prompt)
     # Log cost (NVIDIA free tier = $0)
     try:
         from cost_tracker import log_api_call
-        log_api_call("nvidia", model, 0, 0, "images/generations")
+        log_api_call("nvidia", used_model, 0, 0, "v1/genai")
     except Exception:
         pass
     return json.dumps(result, indent=2)
@@ -539,8 +785,8 @@ def generate_social_graphic(post_content: str, campaign_id: str = "", width: int
 
     The image prompt is authored from the post's core message (Gemini text),
     so the visual matches the post's intent — not a generic brand template.
-    Primary render: Gemini 3.1 Flash Image (branded, ~$0.067/image).
-    Falls back to Stitch, then Pollinations (free).
+    Primary render: NVIDIA NIM (Stable Diffusion → FLUX.1-dev, free tier).
+    Falls back to Gemini 3.1 Flash Image, then Stitch, then Pollinations.
 
     Args:
         post_content: The LinkedIn post text (used for auto-detecting campaign + context).
@@ -552,48 +798,9 @@ def generate_social_graphic(post_content: str, campaign_id: str = "", width: int
         campaign_id = _detect_campaign(post_content)
 
     prompt = build_image_prompt(post_content, campaign_id)
-
-    # 1. Try Gemini 3.1 Flash Image (highest quality, ~$0.067/image)
-    image_data = _call_gemini_image(prompt, aspect_ratio="1:1")
-    if image_data:
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"social_gemini_{ts}.png"
-        out_path = _save_image(image_data, filename)
-        result = {
-            "status": "generated",
-            "output_path": str(out_path),
-            "size_bytes": len(image_data),
-            "width": width,
-            "height": height,
-            "provider": "gemini-3.1-flash-image",
-            "campaign_id": campaign_id,
-        }
-        _save_to_db("gemini", campaign_id, prompt, str(out_path), post_content)
-        return json.dumps(result, indent=2)
-
-    # 2. Try Stitch (if configured)
-    stitch_key = STITCH_API_KEY or os.getenv("STITCH_API_KEY", "")
-    stitch_project = STITCH_PROJECT_ID or os.getenv("STITCH_PROJECT_ID", "")
-    if stitch_key and stitch_project:
-        image_data = _call_stitch_api(prompt)
-        if image_data:
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"social_stitch_{ts}.png"
-            out_path = _save_image(image_data, filename)
-            result = {
-                "status": "generated",
-                "output_path": str(out_path),
-                "size_bytes": len(image_data),
-                "width": width,
-                "height": height,
-                "provider": "stitch",
-                "campaign_id": campaign_id,
-            }
-            _save_to_db("stitch", campaign_id, prompt, str(out_path), post_content)
-            return json.dumps(result, indent=2)
-
-    # 3. Fallback to Pollinations (free, always works)
-    return generate_image(prompt, width, height, model="flux")
+    result = render_image(prompt, width, height, campaign_id=campaign_id, post_content=post_content)
+    result["campaign_id"] = campaign_id
+    return json.dumps(result, indent=2)
 
 
 @server.tool()
@@ -602,28 +809,43 @@ def generate_carousel_images(prompts: list[str], model: str = "flux") -> str:
 
     Each prompt produces one image slide. Use with content_server's
     generate_carousel_script() to get the prompts, then feed them here.
+    Renders through NVIDIA (Stable Diffusion → FLUX.1-dev) and falls back
+    to Pollinations per slide.
 
     Args:
         prompts: List of image prompts, one per carousel slide.
-        model: 'flux' (default) or 'turbo'.
+        model: Pollinations fallback model — 'flux' (default) or 'turbo'.
     """
     slides = []
     for i, prompt in enumerate(prompts):
-        encoded = quote(prompt)
-        url = f"{POLLINATIONS_BASE}/{encoded}?width=1080&height=1080&model={model}&nologo=true&seed={int(time.time())}"
-
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         try:
+            nvidia = _call_nvidia_chain(prompt, 1080, 1080)
+            if nvidia:
+                image_data, used_model = nvidia
+                ext = "jpg" if image_data[:3] == b"\xff\xd8\xff" else "png"
+                slug = used_model.rsplit("/", 1)[-1].replace(".", "-")
+                out_path = _save_image(image_data, f"carousel_{ts}_slide{i+1}_{slug}.{ext}")
+                slides.append({
+                    "slide": i + 1,
+                    "output_path": str(out_path),
+                    "size_bytes": len(image_data),
+                    "provider": "nvidia",
+                    "model": used_model,
+                })
+                continue
+
+            encoded = quote(prompt)
+            url = f"{POLLINATIONS_BASE}/{encoded}?width=1080&height=1080&model={model}&nologo=true&seed={int(time.time())}"
             r = httpx.get(url, timeout=60, follow_redirects=True)
             r.raise_for_status()
 
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"carousel_{ts}_slide{i+1}.jpg"
-            out_path = _save_image(r.content, filename)
-
+            out_path = _save_image(r.content, f"carousel_{ts}_slide{i+1}.jpg")
             slides.append({
                 "slide": i + 1,
                 "output_path": str(out_path),
                 "size_bytes": len(r.content),
+                "provider": "pollinations",
             })
         except Exception as e:
             slides.append({"slide": i + 1, "error": str(e)})
@@ -633,7 +855,7 @@ def generate_carousel_images(prompts: list[str], model: str = "flux") -> str:
         "slide_count": len(prompts),
         "slides": slides,
     }
-    _save_to_db("pollinations", "carousel", json.dumps(prompts), json.dumps(result), str(result))
+    _save_to_db("nvidia", "carousel", json.dumps(prompts), json.dumps(result), str(result))
     return json.dumps(result, indent=2)
 
 
@@ -646,8 +868,9 @@ def list_generated_images(limit: int = 20) -> str:
     """
     import sqlite3
     conn = sqlite3.connect(str(DB_DIR / "data.db"))
+    conn.row_factory = sqlite3.Row
     rows = conn.execute(
-        "SELECT * FROM design_assets WHERE tool = 'pollinations' ORDER BY created_at DESC LIMIT ?",
+        "SELECT * FROM design_assets ORDER BY created_at DESC LIMIT ?",
         (limit,),
     ).fetchall()
     conn.close()

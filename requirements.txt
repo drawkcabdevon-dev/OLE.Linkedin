@@ -6,6 +6,10 @@ python-dotenv>=1.0.0
 # Image generation (Pollinations.ai)
 Pillow>=10.0.0
 
+# Optional: OCR gate that rejects renders containing stray lettering.
+# Needs the `tesseract` system binary; skipped automatically when absent.
+pytesseract>=0.3.10
+
 # Content generation (Google Gemini)
 google-genai>=1.0.0
 

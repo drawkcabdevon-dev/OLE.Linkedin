@@ -18,7 +18,7 @@ steps:
       - '--max-instances=1'
       - '--concurrency=1'
       - '--set-env-vars=WEBHOOK_URL=$_WEBHOOK_URL,LINKEDIN_ORG_ID=125564340,SCHEDULER_SECRET=$_SCHEDULER_SECRET,OLE_DATA_DIR=/app/data,AUTHORIZED_CHAT_ID=$_AUTHORIZED_CHAT_ID'
-      - '--set-secrets=TELEGRAM_BOT_TOKEN=telegram-bot-token:latest,LINKEDIN_ACCESS_TOKEN=linkedin-access-token:latest,STITCH_API_KEY=stitch-api-key:latest'
+      - '--set-secrets=TELEGRAM_BOT_TOKEN=telegram-bot-token:latest,LINKEDIN_ACCESS_TOKEN=linkedin-access-token:latest,STITCH_API_KEY=stitch-api-key:latest,NVIDIA_API_KEY=nvidia-api-key:latest'
       - '--service-account=$_SERVICE_ACCOUNT'
 substitutions:
   _WEBHOOK_URL: 'https://ole-telegram-bot-937426126845.us-central1.run.app'
